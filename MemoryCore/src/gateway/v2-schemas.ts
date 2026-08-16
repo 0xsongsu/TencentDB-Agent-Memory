@@ -113,8 +113,38 @@ import {
 export const conversationAddRequestSchema = z.object({
   session_id: z.string().min(1).default(DEFAULT_ISOLATION_ID),
   messages: z.array(_conversationItemSchema).min(1).max(100),
+  notify_pipeline: z.boolean().default(true),
 });
 export type ConversationAddRequest = z.infer<typeof conversationAddRequestSchema>;
+
+export const conversationIdsRequestSchema = z.object({
+  limit: z.number().int().min(1).max(1000).default(1000),
+  offset: z.number().int().min(0).default(0),
+});
+
+export const atomicImportRequestSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum([
+    "persona",
+    "episodic",
+    "instruction",
+    "work_fact",
+    "work_task",
+    "work_method",
+    "work_artifact",
+  ]),
+  content: z.string().min(1).max(8192),
+  priority: z.number().int().min(-1).max(100).default(50),
+  background: z.string().default(""),
+  version: z.number().int().min(0).default(0),
+  source_session_key: z.string().default(""),
+  source_session_id: z.string().default(DEFAULT_ISOLATION_ID),
+  timestamps: z.array(z.iso.datetime()).default([]),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  created_at: z.iso.datetime(),
+  updated_at: z.iso.datetime(),
+});
+export type AtomicImportRequest = z.infer<typeof atomicImportRequestSchema>;
 
 // ============================
 // Count endpoints (sdk-v3.yaml)
@@ -157,6 +187,13 @@ export interface AtomicDetail extends GeneratedAtomicDetail {
   user_id?: string;
   agent_id?: string;
   task_id?: string;
+  priority?: number;
+  session_key?: string;
+  session_id?: string;
+  timestamp_str?: string;
+  timestamp_start?: string;
+  timestamp_end?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AtomicQueryData {

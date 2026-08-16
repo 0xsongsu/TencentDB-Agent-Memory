@@ -32,11 +32,13 @@ import { reportRecallMetrics } from "../core/report/metric-tracking-recall.js";
 // ── Zod schemas (validated types + defaults) ──
 import {
   conversationAddRequestSchema,
+  conversationIdsRequestSchema,
   conversationQueryRequestSchema,
   conversationSearchRequestSchema,
   conversationDeleteRequestSchema,
   conversationCountRequestSchema,
   atomicUpdateRequestSchema,
+  atomicImportRequestSchema,
   atomicQueryRequestSchema,
   atomicSearchRequestSchema,
   atomicDeleteRequestSchema,
@@ -152,11 +154,13 @@ function collectV3Missing(
 /** /v3 强 isolation 覆盖的 L0–L3 子路径（去掉前缀后的 path）。 */
 const V3_ALLOWED_SUBPATHS = new Set<string>([
   "/conversation/add",
+  "/conversation/ids",
   "/conversation/query",
   "/conversation/search",
   "/conversation/delete",
   "/conversation/count",
   "/atomic/update",
+  "/atomic/import",
   "/atomic/query",
   "/atomic/search",
   "/atomic/delete",
@@ -409,11 +413,13 @@ type RouteHandler = (
  */
 const DATAPLANE_HANDLERS: Record<string, RouteHandler> = {
   "/conversation/add": handleConversationAdd,
+  "/conversation/ids": handleConversationIds,
   "/conversation/query": handleConversationQuery,
   "/conversation/search": handleConversationSearch,
   "/conversation/delete": handleConversationDelete,
   "/conversation/count": handleConversationCount,
   "/atomic/update": handleAtomicUpdate,
+  "/atomic/import": handleAtomicImport,
   "/atomic/query": handleAtomicQuery,
   "/atomic/search": handleAtomicSearch,
   "/atomic/delete": handleAtomicDelete,
@@ -647,7 +653,7 @@ export async function handleV2Route(
 async function handleConversationAdd(body: unknown, auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
   const parsed = conversationAddRequestSchema.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
-  const { session_id, messages } = parsed.data;
+  const { session_id, messages, notify_pipeline } = parsed.data;
 
   // Enforce three-dim isolation. user_id / agent_id come from request body
   // or x-tdai-* headers (resolved in dispatchV2Request).  When the gateway's
@@ -696,9 +702,17 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
   const embedding = deps.getEmbedding();
   const acceptedIds: string[] = [];
   const ingestBaseMs = Date.now();
+  let embeddings: Float32Array[] = [];
+  if (embedding) {
+    try {
+      embeddings = await embedding.embedBatch(messages.map((message) => message.content));
+    } catch (error) {
+      console.warn("[v2-router] L0 embedding failed:", error);
+    }
+  }
 
   for (const [index, msg] of messages.entries()) {
-    const id = `msg-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const id = msg.id || `msg-${randomUUID().replace(/-/g, "").slice(0, 12)}`;
     const recordedAtMs = ingestBaseMs + index;
     const record: L0Record = {
       id,
@@ -715,19 +729,16 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
       timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : recordedAtMs,
     };
 
-    let emb: Float32Array | undefined;
-    if (embedding) {
-      try { emb = await embedding.embed(msg.content); } catch (e) { console.warn(`[v2-router] L0 embedding failed:`, e); }
+    if (!(await store.upsertL0(record, embeddings[index]))) {
+      return errorEnvelope(503, "Conversation store write failed", requestId);
     }
-
-    await store.upsertL0(record, emb);
     acceptedIds.push(id);
   }
 
   // Notify pipeline: trigger async L1 extraction (service mode).
   // Each role=user message counts as one conversation round for threshold/timer logic.
   // teamId/agentId 透传给 captureAtomic 决定 hash slot 与锁粒度。
-  if (deps.notifyPipeline) {
+  if (notify_pipeline && deps.notifyPipeline) {
     const rounds = messages.filter((m) => m.role === "user").length;
     if (rounds > 0) {
       try {
@@ -818,7 +829,9 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
       task_id: r.task_id,
       role: r.role as ConversationItem["role"],
       content: r.message_text,
-      timestamp: r.recorded_at,
+      timestamp: r.timestamp
+        ? new Date(r.timestamp).toISOString()
+        : r.recorded_at,
     }));
 
     return successEnvelope<ConversationQueryData>({ messages, total: result.total }, requestId);
@@ -845,10 +858,45 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
     task_id: r.task_id,
     role: r.role as ConversationItem["role"],
     content: r.message_text,
-    timestamp: r.recorded_at,
+    timestamp: r.timestamp
+      ? new Date(r.timestamp).toISOString()
+      : r.recorded_at,
   }));
 
   return successEnvelope<ConversationQueryData>({ messages, total }, requestId);
+}
+
+async function handleConversationIds(
+  body: unknown,
+  _auth: V2AuthContext,
+  requestId: string,
+  deps: V2RouterDeps,
+): Promise<ApiResponseEnvelope> {
+  const parsed = conversationIdsRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return errorEnvelope(400, formatZodError(parsed.error), requestId);
+  }
+  const store = deps.getStore();
+  if (!store?.queryL0Paginated) {
+    return errorEnvelope(
+      503,
+      "Paginated conversation store is not available",
+      requestId,
+    );
+  }
+  const iso = deps.requestIsolation;
+  const result = await store.queryL0Paginated({
+    teamId: iso?.teamId,
+    userId: iso?.userId,
+    agentId: iso?.agentId,
+    taskId: iso?.taskId,
+    limit: parsed.data.limit,
+    offset: parsed.data.offset,
+  });
+  return successEnvelope(
+    { ids: result.rows.map((row) => row.record_id), total: result.total },
+    requestId,
+  );
 }
 
 async function handleConversationCount(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
@@ -950,7 +998,16 @@ async function handleConversationSearch(body: unknown, auth: V2AuthContext, requ
   }
 
   const messages: ConversationSearchHit[] = result.results.map((r) => ({
-    id: r.id, role: r.role as ConversationSearchHit["role"], content: r.content, timestamp: r.recorded_at, score: r.score,
+    id: r.id,
+    session_id: r.session_id,
+    user_id: r.user_id,
+    agent_id: r.agent_id,
+    role: r.role as ConversationSearchHit["role"],
+    content: r.content,
+    timestamp: r.timestamp
+      ? new Date(r.timestamp).toISOString()
+      : r.recorded_at,
+    score: r.score,
   }));
 
   return successEnvelope<ConversationSearchData>({ messages }, requestId);
@@ -1062,6 +1119,53 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
   return successEnvelope<AtomicUpdateData>({ id, version: `v${updatedVersion}`, updated_at: now }, requestId);
 }
 
+async function handleAtomicImport(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
+  const parsed = atomicImportRequestSchema.safeParse(body);
+  if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
+
+  const store = deps.getStore();
+  if (!store) return errorEnvelope(503, "Store not available", requestId);
+  const input = parsed.data;
+  const existing = await store.queryL1Records({ recordIds: [input.id] });
+  if (existing.length > 0) {
+    return successEnvelope({ id: input.id, imported: false }, requestId);
+  }
+
+  const iso = deps.requestIsolation;
+  const record: MemoryRecord = {
+    id: input.id,
+    content: input.content,
+    type: input.type,
+    priority: input.priority,
+    scene_name: input.background,
+    source_message_ids: [],
+    metadata: input.metadata,
+    timestamps: input.timestamps,
+    createdAt: input.created_at,
+    updatedAt: input.updated_at,
+    version: input.version,
+    sessionKey: input.source_session_key,
+    sessionId: input.source_session_id,
+    taskId: iso?.taskId,
+    teamId: iso?.teamId,
+    userId: iso?.userId,
+    agentId: iso?.agentId,
+  };
+  const embedding = deps.getEmbedding();
+  let vector: Float32Array | undefined;
+  if (embedding) {
+    try {
+      vector = await embedding.embed(input.content);
+    } catch (error) {
+      deps.logger.warn("[v2-router] L1 import embedding failed", error);
+    }
+  }
+  if (!(await store.upsertL1(record, vector))) {
+    return errorEnvelope(503, "Atomic memory store write failed", requestId);
+  }
+  return successEnvelope({ id: input.id, imported: true }, requestId);
+}
+
 async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
   const parsed = atomicQueryRequestSchema.safeParse(body);
   if (!parsed.success) return errorEnvelope(400, formatZodError(parsed.error), requestId);
@@ -1089,6 +1193,13 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
       user_id: r.user_id,
       agent_id: r.agent_id,
       task_id: r.task_id,
+      priority: r.priority,
+      session_key: r.session_key,
+      session_id: r.session_id,
+      timestamp_str: r.timestamp_str,
+      timestamp_start: r.timestamp_start,
+      timestamp_end: r.timestamp_end,
+      metadata: parseMetadataJson(r.metadata_json),
       created_at: r.created_time, updated_at: r.updated_time,
     }));
     return successEnvelope<AtomicQueryData>({ items, total: result.total }, requestId);
@@ -1114,6 +1225,13 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
     user_id: r.user_id,
     agent_id: r.agent_id,
     task_id: r.task_id,
+    priority: r.priority,
+    session_key: r.session_key,
+    session_id: r.session_id,
+    timestamp_str: r.timestamp_str,
+    timestamp_start: r.timestamp_start,
+    timestamp_end: r.timestamp_end,
+    metadata: parseMetadataJson(r.metadata_json),
     created_at: r.created_time, updated_at: r.updated_time,
   }));
 
@@ -2210,11 +2328,13 @@ function formatLocalDateForJsonl(d: Date): string {
 
 export {
   handleConversationAdd,
+  handleConversationIds,
   handleConversationQuery,
   handleConversationSearch,
   handleConversationDelete,
   handleConversationCount,
   handleAtomicUpdate,
+  handleAtomicImport,
   handleAtomicQuery,
   handleAtomicSearch,
   handleAtomicDelete,

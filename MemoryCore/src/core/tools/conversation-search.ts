@@ -3,16 +3,23 @@
  *
  * Supports three search strategies with automatic degradation:
  *   1. **hybrid** (default) — FTS5 keyword + vector embedding in parallel,
- *      merged via Reciprocal Rank Fusion (RRF).
+ *      merged with explicit keyword/vector candidate slots.
  *   2. **embedding** — pure vector similarity (when FTS5 is unavailable).
  *   3. **fts** — pure FTS5 keyword search (when embedding is unavailable).
  *
  * The tool is registered via `api.registerTool()` in index.ts.
  */
 
-import type { IMemoryStore, IsolationFilter, L0SearchResult } from "../store/types.js";
+import type {
+  IMemoryStore,
+  IsolationFilter,
+  L0SearchResult,
+} from "../store/types.js";
 import { buildFtsQuery } from "../store/sqlite.js";
-import type { EmbeddingService } from "../store/embedding.js";
+import {
+  embeddingSearchQuery,
+  type EmbeddingService,
+} from "../store/embedding.js";
 import type { Logger } from "../types.js";
 
 // ============================
@@ -31,6 +38,7 @@ export interface ConversationSearchResultItem {
   content: string;
   score: number;
   recorded_at: string;
+  timestamp: number;
 }
 
 export interface ConversationSearchResult {
@@ -44,39 +52,53 @@ export interface ConversationSearchResult {
 
 const TAG = "[memory-tdai][tdai_conversation_search]";
 
+function buildAnchorFtsQuery(raw: string): string | null {
+  const monthAnchors = [...raw.matchAll(/20\d{2}年\s*(1[0-2]|0?[1-9])月/g)].map(
+    (match) => match[1].padStart(2, "0"),
+  );
+  const anchors = [
+    ...new Set([
+      ...(raw.match(
+        /[A-Z][A-Z0-9.-]{1,}|[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)+|20\d{2}/g,
+      ) ?? []),
+      ...monthAnchors,
+    ]),
+  ].filter((value) => value !== "AI" && value !== "OS");
+  return anchors.length > 0
+    ? anchors.map((value) => `"${value}"`).join(" AND ")
+    : null;
+}
+
+function normalizedSearchText(value: string): string {
+  return value
+    .normalize("NFC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase();
+}
+
 // ============================
-// RRF (Reciprocal Rank Fusion)
+// Hybrid result merge
 // ============================
 
-/** Standard RRF constant from the original RRF paper. */
-const RRF_K = 60;
-
-/**
- * Merge multiple ranked lists of `ConversationSearchResultItem` via Reciprocal
- * Rank Fusion. Items appearing in multiple lists get their RRF scores summed.
- *
- * Returns items sorted by descending RRF score. The `score` field of each
- * returned item is replaced by the RRF score for consistent ranking semantics.
- */
-function rrfMergeL0(...lists: ConversationSearchResultItem[][]): ConversationSearchResultItem[] {
-  const map = new Map<string, { item: ConversationSearchResultItem; rrfScore: number }>();
-
-  for (const list of lists) {
-    for (let rank = 0; rank < list.length; rank++) {
-      const item = list[rank];
-      const score = 1 / (RRF_K + rank + 1);
-      const existing = map.get(item.id);
-      if (existing) {
-        existing.rrfScore += score;
-      } else {
-        map.set(item.id, { item, rrfScore: score });
-      }
-    }
-  }
-
-  return [...map.values()]
-    .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ item, rrfScore }) => ({ ...item, score: rrfScore }));
+function mergeHybridL0(
+  ftsItems: ConversationSearchResultItem[],
+  vecItems: ConversationSearchResultItem[],
+  limit: number,
+): ConversationSearchResultItem[] {
+  const ftsSlots = Math.max(1, Math.floor(limit * 0.5));
+  const ranked = [
+    ...ftsItems.slice(0, ftsSlots),
+    ...vecItems.slice(0, limit - ftsSlots),
+    ...ftsItems.slice(ftsSlots),
+    ...vecItems.slice(limit - ftsSlots),
+  ];
+  const seen = new Set<string>();
+  return ranked.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 }
 
 // ============================
@@ -104,9 +126,9 @@ export async function executeConversationSearch(params: {
 
   logger?.debug?.(
     `${TAG} CALLED: query="${query.slice(0, 100)}", limit=${limit}, ` +
-    `sessionFilter=${sessionFilter ?? "(none)"}, ` +
-    `vectorStore=${vectorStore ? "available" : "UNAVAILABLE"}, ` +
-    `embeddingService=${embeddingService ? "available" : "UNAVAILABLE"}`,
+      `sessionFilter=${sessionFilter ?? "(none)"}, ` +
+      `vectorStore=${vectorStore ? "available" : "UNAVAILABLE"}, ` +
+      `embeddingService=${embeddingService ? "available" : "UNAVAILABLE"}`,
   );
 
   if (!query || query.trim().length === 0) {
@@ -124,7 +146,9 @@ export async function executeConversationSearch(params: {
   const hasFts = vectorStore.isFtsAvailable();
 
   if (!hasEmbedding && !hasFts) {
-    logger?.warn?.(`${TAG} Neither EmbeddingService nor FTS5 available — cannot search`);
+    logger?.warn?.(
+      `${TAG} Neither EmbeddingService nor FTS5 available — cannot search`,
+    );
     return {
       results: [],
       total: 0,
@@ -143,10 +167,15 @@ export async function executeConversationSearch(params: {
   // If the store natively supports hybrid search (dense + sparse + RRF in a
   // single API call), skip the dual-path FTS+Vector logic to avoid a redundant
   // second HTTP request with garbled FTS tokens as embedding input.
-  if (vectorStore.getCapabilities().nativeHybridSearch && vectorStore.searchL0Hybrid) {
+  if (
+    vectorStore.getCapabilities().nativeHybridSearch &&
+    vectorStore.searchL0Hybrid
+  ) {
     logger?.debug?.(`${TAG} [native-hybrid] Single-call hybrid search...`);
     const results = await vectorStore.searchL0Hybrid(
-      isolationFilter ? { query, topK: candidateK, filter: isolationFilter } : { query, topK: candidateK },
+      isolationFilter
+        ? { query, topK: candidateK, filter: isolationFilter }
+        : { query, topK: candidateK },
     );
     let items: ConversationSearchResultItem[] = results.map((r) => ({
       id: r.record_id,
@@ -158,6 +187,7 @@ export async function executeConversationSearch(params: {
       content: r.message_text,
       score: r.score,
       recorded_at: r.recorded_at,
+      timestamp: r.timestamp,
     }));
 
     // Apply session filter
@@ -167,34 +197,80 @@ export async function executeConversationSearch(params: {
     const trimmed = items.slice(0, limit);
     logger?.debug?.(
       `${TAG} RESULT (strategy=native-hybrid): returning ${trimmed.length} messages ` +
-      `(scores: [${trimmed.map((r) => r.score.toFixed(3)).join(", ")}])`,
+        `(scores: [${trimmed.map((r) => r.score.toFixed(3)).join(", ")}])`,
     );
     return { results: trimmed, total: trimmed.length, strategy: "hybrid" };
   }
 
-  // ── SQLite dual-path: run FTS5 + Vector in parallel, merge with client-side RRF ──
+  const queryEmbedding = hasEmbedding
+    ? embeddingService!.embed(embeddingSearchQuery(embeddingService!, query))
+    : undefined;
+
+  // ── SQLite dual-path: run FTS5 + Vector in parallel, merge explicit slots ──
   const [ftsItems, vecItems] = await Promise.all([
     // FTS5 keyword search on L0
     (async (): Promise<ConversationSearchResultItem[]> => {
       if (!hasFts) return [];
       try {
-        const ftsQuery = buildFtsQuery(query);
-        if (!ftsQuery) {
-          logger?.debug?.(`${TAG} [hybrid-fts] No usable FTS tokens from query`);
+        const broadFtsQuery = buildFtsQuery(query);
+        if (!broadFtsQuery) {
+          logger?.debug?.(
+            `${TAG} [hybrid-fts] No usable FTS tokens from query`,
+          );
           return [];
         }
-        logger?.debug?.(`${TAG} [hybrid-fts] FTS5 query: "${ftsQuery}"`);
-        const ftsResults = isolationFilter
-          ? await vectorStore.searchL0Fts(ftsQuery, candidateK, isolationFilter)
-          : await vectorStore.searchL0Fts(ftsQuery, candidateK);
-        logger?.debug?.(`${TAG} [hybrid-fts] FTS5 returned ${ftsResults.length} candidates`);
+        logger?.debug?.(`${TAG} [hybrid-fts] FTS5 query: "${broadFtsQuery}"`);
+        const broadResults = await vectorStore.searchL0Fts(
+          broadFtsQuery,
+          candidateK,
+          isolationFilter,
+        );
+        const normalizedQuery = normalizedSearchText(query);
+        const queryTerms = normalizedQuery
+          .split(" ")
+          .filter((term) => term.length >= 2);
+        const exactMatch = broadResults.some((result) => {
+          const content = normalizedSearchText(result.message_text);
+          return (
+            content.includes(normalizedQuery) ||
+            (queryTerms.length >= 2 &&
+              queryTerms.every((term) => content.includes(term)))
+          );
+        });
+        const strictFtsQuery = broadFtsQuery.replaceAll(" OR ", " AND ");
+        const strictMatch =
+          exactMatch || strictFtsQuery === broadFtsQuery
+            ? exactMatch || broadResults.length > 0
+            : (
+                await vectorStore.searchL0Fts(
+                  strictFtsQuery,
+                  1,
+                  isolationFilter,
+                )
+              ).length > 0;
+        const ftsResults =
+          strictMatch || !queryEmbedding
+            ? broadResults
+            : await vectorStore.searchL0Fts(
+                buildAnchorFtsQuery(query) ?? broadFtsQuery,
+                candidateK,
+                isolationFilter,
+                await queryEmbedding,
+              );
+        logger?.debug?.(
+          `${TAG} [hybrid-fts] FTS5 returned ${ftsResults.length} candidates`,
+        );
         return ftsResults.map((r) => ({
           id: r.record_id,
           session_key: r.session_key,
+          session_id: r.session_id,
+          user_id: r.user_id,
+          agent_id: r.agent_id,
           role: r.role,
           content: r.message_text,
           score: r.score,
           recorded_at: r.recorded_at,
+          timestamp: r.timestamp,
         }));
       } catch (err) {
         logger?.warn?.(
@@ -209,14 +285,21 @@ export async function executeConversationSearch(params: {
       if (!hasEmbedding) return [];
       try {
         logger?.debug?.(`${TAG} [hybrid-vec] Generating query embedding...`);
-        const queryEmbedding = await embeddingService!.embed(query);
+        const embedding = await queryEmbedding!;
         logger?.debug?.(
-          `${TAG} [hybrid-vec] Embedding OK, dims=${queryEmbedding.length}, searching top-${candidateK}...`,
+          `${TAG} [hybrid-vec] Embedding OK, dims=${embedding.length}, searching top-${candidateK}...`,
         );
         const vecResults: L0SearchResult[] = isolationFilter
-          ? await vectorStore.searchL0Vector(queryEmbedding, candidateK, query, isolationFilter)
-          : await vectorStore.searchL0Vector(queryEmbedding, candidateK, query);
-        logger?.debug?.(`${TAG} [hybrid-vec] Vector search returned ${vecResults.length} candidates`);
+          ? await vectorStore.searchL0Vector(
+              embedding,
+              candidateK,
+              query,
+              isolationFilter,
+            )
+          : await vectorStore.searchL0Vector(embedding, candidateK, query);
+        logger?.debug?.(
+          `${TAG} [hybrid-vec] Vector search returned ${vecResults.length} candidates`,
+        );
         return vecResults.map((r) => ({
           id: r.record_id,
           session_key: r.session_key,
@@ -227,6 +310,7 @@ export async function executeConversationSearch(params: {
           content: r.message_text,
           score: r.score,
           recorded_at: r.recorded_at,
+          timestamp: r.timestamp,
         }));
       } catch (err) {
         logger?.warn?.(
@@ -250,15 +334,19 @@ export async function executeConversationSearch(params: {
     strategy = "fts";
   } else {
     logger?.debug?.(`${TAG} Both search paths returned 0 results`);
-    return { results: [], total: 0, strategy: hasEmbedding ? "embedding" : "fts" };
+    return {
+      results: [],
+      total: 0,
+      strategy: hasEmbedding ? "embedding" : "fts",
+    };
   }
 
   // ── Merge results ──
   let results: ConversationSearchResultItem[];
   if (strategy === "hybrid") {
-    results = rrfMergeL0(ftsItems, vecItems);
+    results = mergeHybridL0(ftsItems, vecItems, limit);
     logger?.debug?.(
-      `${TAG} [hybrid] RRF merged: fts=${ftsItems.length}, vec=${vecItems.length} → ${results.length} unique`,
+      `${TAG} [hybrid] Slot merged: fts=${ftsItems.length}, vec=${vecItems.length} → ${results.length} unique`,
     );
   } else {
     // Single-source: use whichever list has results (already sorted by score)
@@ -269,7 +357,9 @@ export async function executeConversationSearch(params: {
   if (sessionFilter) {
     const preFilterCount = results.length;
     results = results.filter((r) => r.session_key === sessionFilter);
-    logger?.debug?.(`${TAG} After session filter "${sessionFilter}": ${results.length}/${preFilterCount}`);
+    logger?.debug?.(
+      `${TAG} After session filter "${sessionFilter}": ${results.length}/${preFilterCount}`,
+    );
   }
 
   // ── Trim to requested limit ──
@@ -277,7 +367,7 @@ export async function executeConversationSearch(params: {
 
   logger?.debug?.(
     `${TAG} RESULT (strategy=${strategy}): returning ${trimmed.length} messages ` +
-    `(scores: [${trimmed.map((r) => r.score.toFixed(3)).join(", ")}])`,
+      `(scores: [${trimmed.map((r) => r.score.toFixed(3)).join(", ")}])`,
   );
 
   return {
@@ -291,7 +381,9 @@ export async function executeConversationSearch(params: {
 // Tool response formatter
 // ============================
 
-export function formatConversationSearchResponse(result: ConversationSearchResult): string {
+export function formatConversationSearchResponse(
+  result: ConversationSearchResult,
+): string {
   if (result.message) {
     return result.message;
   }
@@ -299,16 +391,18 @@ export function formatConversationSearchResponse(result: ConversationSearchResul
     return "No matching conversation messages found.";
   }
 
-  const lines: string[] = [
-    `Found ${result.total} matching message(s):`,
-    "",
-  ];
+  const lines: string[] = [`Found ${result.total} matching message(s):`, ""];
 
   for (const item of result.results) {
-    const scoreStr = typeof item.score === "number" ? ` (score: ${item.score.toFixed(3)})` : "";
+    const scoreStr =
+      typeof item.score === "number"
+        ? ` (score: ${item.score.toFixed(3)})`
+        : "";
     const dateStr = item.recorded_at ? ` [${item.recorded_at}]` : "";
     lines.push(`---`);
-    lines.push(`**[${item.role}]** Session: ${item.session_key}${dateStr}${scoreStr}`);
+    lines.push(
+      `**[${item.role}]** Session: ${item.session_key}${dateStr}${scoreStr}`,
+    );
     lines.push("");
     lines.push(item.content);
     lines.push("");

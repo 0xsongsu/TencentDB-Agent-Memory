@@ -585,7 +585,7 @@ export interface IMemoryStore {
   // ── L0 Search ────────────────────────────────────────────
 
   searchL0Vector(queryEmbedding: Float32Array, topK?: number, queryText?: string, filter?: IsolationFilter): MaybePromise<L0SearchResult[]>;
-  searchL0Fts(ftsQuery: string, limit?: number, filter?: IsolationFilter): MaybePromise<L0FtsResult[]>;
+  searchL0Fts(ftsQuery: string, limit?: number, filter?: IsolationFilter, queryEmbedding?: Float32Array): MaybePromise<L0FtsResult[]>;
   searchL0Hybrid?(params: {
     query?: string;
     queryEmbedding?: Float32Array;
@@ -610,6 +610,7 @@ export interface IMemoryStore {
   reindexAll(
     embedFn: (text: string) => Promise<Float32Array>,
     onProgress?: (done: number, total: number, layer: "L1" | "L0") => void,
+    embedBatchFn?: (texts: string[]) => Promise<Float32Array[]>,
   ): Promise<{ l1Count: number; l0Count: number }>;
 
   // ── FTS (always sync — cached flag) ──────────────────────

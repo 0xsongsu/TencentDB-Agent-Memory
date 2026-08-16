@@ -3,7 +3,7 @@
  *
  * Supports three search strategies with automatic degradation:
  *   1. **hybrid** (default) — FTS5 keyword + vector embedding in parallel,
- *      merged via Reciprocal Rank Fusion (RRF).
+ *      merged with explicit keyword/vector candidate slots.
  *   2. **embedding** — pure vector similarity (when FTS5 is unavailable).
  *   3. **fts** — pure FTS5 keyword search (when embedding is unavailable).
  *
@@ -12,7 +12,10 @@
 
 import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/types.js";
 import { buildFtsQuery } from "../store/sqlite.js";
-import type { EmbeddingService } from "../store/embedding.js";
+import {
+  embeddingSearchQuery,
+  type EmbeddingService,
+} from "../store/embedding.js";
 import type { Logger } from "../types.js";
 
 // ============================
@@ -46,38 +49,27 @@ export interface MemorySearchResult {
 const TAG = "[memory-tdai][tdai_memory_search]";
 
 // ============================
-// RRF (Reciprocal Rank Fusion)
+// Hybrid result merge
 // ============================
 
-/** Standard RRF constant from the original RRF paper. */
-const RRF_K = 60;
-
-/**
- * Merge multiple ranked lists of `MemorySearchResultItem` via Reciprocal Rank
- * Fusion. Items appearing in multiple lists get their RRF scores summed.
- *
- * Returns items sorted by descending RRF score. The `score` field of each
- * returned item is replaced by the RRF score for consistent ranking semantics.
- */
-function rrfMergeL1(...lists: MemorySearchResultItem[][]): MemorySearchResultItem[] {
-  const map = new Map<string, { item: MemorySearchResultItem; rrfScore: number }>();
-
-  for (const list of lists) {
-    for (let rank = 0; rank < list.length; rank++) {
-      const item = list[rank];
-      const score = 1 / (RRF_K + rank + 1);
-      const existing = map.get(item.id);
-      if (existing) {
-        existing.rrfScore += score;
-      } else {
-        map.set(item.id, { item, rrfScore: score });
-      }
-    }
-  }
-
-  return [...map.values()]
-    .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ item, rrfScore }) => ({ ...item, score: rrfScore }));
+function mergeHybridL1(
+  ftsItems: MemorySearchResultItem[],
+  vecItems: MemorySearchResultItem[],
+  limit: number,
+): MemorySearchResultItem[] {
+  const ftsSlots = Math.max(1, Math.floor(limit * 0.5));
+  const ranked = [
+    ...ftsItems.slice(0, ftsSlots),
+    ...vecItems.slice(0, limit - ftsSlots),
+    ...ftsItems.slice(ftsSlots),
+    ...vecItems.slice(limit - ftsSlots),
+  ];
+  const seen = new Set<string>();
+  return ranked.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 }
 
 // ============================
@@ -225,7 +217,9 @@ export async function executeMemorySearch(params: {
       if (!hasEmbedding) return [];
       try {
         logger?.debug?.(`${TAG} [hybrid-vec] Generating query embedding...`);
-        const queryEmbedding = await embeddingService!.embed(query);
+        const queryEmbedding = await embeddingService!.embed(
+          embeddingSearchQuery(embeddingService!, query),
+        );
         logger?.debug?.(
           `${TAG} [hybrid-vec] Embedding OK, dims=${queryEmbedding.length}, searching top-${candidateK}...`,
         );
@@ -276,9 +270,9 @@ export async function executeMemorySearch(params: {
   // ── Merge results ──
   let results: MemorySearchResultItem[];
   if (strategy === "hybrid") {
-    results = rrfMergeL1(ftsItems, vecItems);
+    results = mergeHybridL1(ftsItems, vecItems, limit);
     logger?.debug?.(
-      `${TAG} [hybrid] RRF merged: fts=${ftsItems.length}, vec=${vecItems.length} → ${results.length} unique`,
+      `${TAG} [hybrid] Slot merged: fts=${ftsItems.length}, vec=${vecItems.length} → ${results.length} unique`,
     );
   } else {
     // Single-source: use whichever list has results (already sorted by score)
