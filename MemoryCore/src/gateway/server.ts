@@ -1590,7 +1590,8 @@ export class TdaiGateway {
     this.stateBackend = await createStateBackend({
       type: backendType,
       local: backendType === "local" ? {
-        onTimerExpired: (entry) => {
+        checkpointPath: join(this.config.data.baseDir, ".metadata", "local-state-backend.json"),
+        onTimerExpired: async (entry) => {
           // Parse timer member by prefix: "offload-{type}:{instanceId}:{sessionId}[:{extra}]"
           // or legacy "session:L2_schedule"
           const member = entry.member;
@@ -1643,7 +1644,7 @@ export class TdaiGateway {
             if (mmdMatch) targetMmdFile = mmdMatch[1];
           }
           const task = {
-            id: `${taskType}-${sessionId}-${now}`,
+            id: `${taskType}-${member}-${entry.fireAtMs}`,
             type: taskType as any,
             instanceId,
             sessionId,
@@ -1653,11 +1654,13 @@ export class TdaiGateway {
             createdAt: now,
             data: { triggeredBy: "timer_scanner", timerMember: member, instanceId, targetMmdFile, teamId, agentId },
           };
-          this.stateBackend!.enqueueTask(task).then(() => {
+          try {
+            await this.stateBackend!.enqueueTask(task);
             this.logger.info(`[local-timer] Timer fired: ${member} → enqueued ${taskType} task`);
-          }).catch((err) => {
-            this.logger.error(`[local-timer] Failed to enqueue task for ${member}: ${err instanceof Error ? err.message : String(err)}`);
-          });
+          } catch (error) {
+            this.logger.error(`[local-timer] Failed to enqueue task for ${member}: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+          }
         },
       } : undefined,
       redis: backendType === "redis" ? {
