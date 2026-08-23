@@ -1153,7 +1153,7 @@ async function handleAtomicImport(body: unknown, _auth: V2AuthContext, requestId
   };
   const embedding = deps.getEmbedding();
   let vector: Float32Array | undefined;
-  if (embedding) {
+  if (embedding && !input.skip_embedding) {
     try {
       vector = await embedding.embed(input.content);
     } catch (error) {

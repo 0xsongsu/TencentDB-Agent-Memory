@@ -141,6 +141,7 @@ export const atomicImportRequestSchema = z.object({
   source_session_id: z.string().default(DEFAULT_ISOLATION_ID),
   timestamps: z.array(z.iso.datetime()).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  skip_embedding: z.boolean().default(false),
   created_at: z.iso.datetime(),
   updated_at: z.iso.datetime(),
 });
