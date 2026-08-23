@@ -18,7 +18,7 @@ import { batchDedup } from "./l1-dedup.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
-import { sanitizeJsonForParse, shouldExtractL1 } from "../../utils/sanitize.js";
+import { extractJsonArrayCandidate, sanitizeJsonForParse, shouldExtractL1 } from "../../utils/sanitize.js";
 import type { IMemoryStore } from "../store/types.js";
 import type { EmbeddingService } from "../store/embedding.js";
 import { report } from "../report/reporter.js";
@@ -453,20 +453,14 @@ async function callLlmExtraction(params: {
  */
 function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
   try {
-    // Strip markdown code block wrappers if present
-    let cleaned = raw.trim();
-    if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
-    }
-
     // Try to extract JSON array
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
+    const arrayCandidate = extractJsonArrayCandidate(raw);
+    if (!arrayCandidate) {
       logger?.warn?.(`${TAG} No JSON array found in extraction response`);
       // [l1-debug] NO_JSON — dump the full raw so we can see what the LLM actually said
       const rawPreview = raw.slice(0, 2048);
       logger?.warn?.(
-        `${TAG} [l1-debug] NO_JSON taskId=l1-extraction, rawLen=${raw.length}, cleanedLen=${cleaned.length}, rawFull=${JSON.stringify(rawPreview)}${raw.length > 2048 ? `…(+${raw.length - 2048})` : ""}`,
+        `${TAG} [l1-debug] NO_JSON taskId=l1-extraction, rawLen=${raw.length}, rawFull=${JSON.stringify(rawPreview)}${raw.length > 2048 ? `…(+${raw.length - 2048})` : ""}`,
       );
       return [];
     }
@@ -475,7 +469,7 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
     // Some weaker OpenAI-compatible models occasionally emit bare identifiers for
     // numeric fields (e.g. `"priority": sheet`). Repair only known safe fields and
     // retry once so one bad scalar does not drop the whole extraction result.
-    const sanitized = sanitizeJsonForParse(arrayMatch[0]);
+    const sanitized = sanitizeJsonForParse(arrayCandidate);
     let parsed: unknown[];
     try {
       parsed = JSON.parse(sanitized) as unknown[];

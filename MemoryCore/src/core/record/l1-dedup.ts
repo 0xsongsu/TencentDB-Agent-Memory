@@ -16,7 +16,7 @@ import type { ExtractedMemory, MemoryRecord, DedupDecision, MemoryType } from ".
 import { formatBatchConflictPrompt, getConflictDetectionSystemPrompt } from "../prompts/l1-dedup.js";
 import type { CandidateMatch } from "../prompts/l1-dedup.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
-import { sanitizeJsonForParse } from "../../utils/sanitize.js";
+import { extractJsonArrayCandidate, sanitizeJsonForParse } from "../../utils/sanitize.js";
 import type { IMemoryStore, IsolationFilter } from "../store/types.js";
 import { buildFtsQuery } from "../store/sqlite.js";
 import type { EmbeddingService } from "../store/embedding.js";
@@ -323,21 +323,15 @@ function parseBatchResult(
   logger?: Logger,
 ): DedupDecision[] {
   try {
-    // Strip markdown code block wrappers
-    let cleaned = raw.trim();
-    if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
-    }
-
     // Extract JSON array
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
+    const arrayCandidate = extractJsonArrayCandidate(raw);
+    if (!arrayCandidate) {
       logger?.warn?.(`${TAG} No JSON array found in conflict detection response`);
       return fallbackStoreAll(memories);
     }
 
     // Sanitize control characters inside JSON string literals that LLM may produce
-    const sanitized = sanitizeJsonForParse(arrayMatch[0]);
+    const sanitized = sanitizeJsonForParse(arrayCandidate);
     const parsed = JSON.parse(sanitized) as unknown[];
 
     if (!Array.isArray(parsed)) {

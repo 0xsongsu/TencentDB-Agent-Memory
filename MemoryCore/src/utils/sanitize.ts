@@ -333,6 +333,43 @@ export function sanitizeJsonForParse(raw: string): string {
   return stripped;
 }
 
+/** Extract the last parseable JSON array from an LLM response. */
+export function extractJsonArrayCandidate(raw: string): string | null {
+  const candidates: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "[") {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if (char === "]" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) candidates.push(raw.slice(start, index + 1));
+    }
+  }
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index]!;
+    try {
+      if (Array.isArray(JSON.parse(sanitizeJsonForParse(candidate)))) return candidate;
+    } catch {
+      // Invalid bracketed prose such as [msg-123]; try the preceding candidate.
+    }
+  }
+  return null;
+}
+
 /**
  * Walk through a JSON text and escape U+0000–U+001F control characters that
  * appear *inside* JSON string literals (between unescaped `"` delimiters).
