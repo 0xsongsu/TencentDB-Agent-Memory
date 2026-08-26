@@ -36,6 +36,7 @@ export interface MemorySearchResultItem {
   version: number;
   created_at: string;
   updated_at: string;
+  metadata_json: string;
 }
 
 export interface MemorySearchResult {
@@ -157,6 +158,7 @@ export async function executeMemorySearch(params: {
       version: r.version ?? 0,
       created_at: r.timestamp_start,
       updated_at: r.timestamp_end,
+      metadata_json: r.metadata_json,
     }));
 
     // Apply secondary filters
@@ -203,6 +205,7 @@ export async function executeMemorySearch(params: {
       version: r.version ?? 0,
           created_at: r.timestamp_start,
           updated_at: r.timestamp_end,
+          metadata_json: r.metadata_json,
         }));
       } catch (err) {
         logger?.warn?.(
@@ -241,6 +244,7 @@ export async function executeMemorySearch(params: {
       version: r.version ?? 0,
           created_at: r.timestamp_start,
           updated_at: r.timestamp_end,
+          metadata_json: r.metadata_json,
         }));
       } catch (err) {
         logger?.warn?.(
