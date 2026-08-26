@@ -404,9 +404,12 @@ export class LocalStateBackend implements IStateBackend {
     this.pendingTasks.clear();
     for (const task of [...snapshot.taskQueue, ...snapshot.pendingTasks]) this.insertTask(task);
     for (const [key, timer] of snapshot.timers) {
-      this.armTimer(key, timer.member, timer.fireAtMs);
+      this.timers.set(key, { member: timer.member, fireAtMs: timer.fireAtMs });
     }
     await this.persist();
+    for (const [key, timer] of snapshot.timers) {
+      this.armTimer(key, timer.member, timer.fireAtMs);
+    }
   }
 
   async destroy(): Promise<void> {

@@ -41,4 +41,32 @@ describe("LocalStateBackend durable task settlement", () => {
     expect(await settled.consumeTask("worker-3")).toBeNull();
     await settled.destroy();
   });
+
+  it("does not fire restored timers before initialization returns", async () => {
+    dir = await mkdtemp(join(tmpdir(), "tdai-state-"));
+    const checkpointPath = join(dir, "state.json");
+    const first = new LocalStateBackend({ checkpointPath });
+    await first.initialize();
+    await first.setTimer("default", "session-1:L1_idle", Date.now() + 5);
+    await first.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    let initialized = false;
+    let resolveExpired!: () => void;
+    const expired = new Promise<void>((resolve) => {
+      resolveExpired = resolve;
+    });
+    const recovered = new LocalStateBackend({
+      checkpointPath,
+      onTimerExpired: () => {
+        expect(initialized).toBe(true);
+        resolveExpired();
+      },
+    });
+    await recovered.initialize();
+    initialized = true;
+    await expired;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await recovered.destroy();
+  });
 });
