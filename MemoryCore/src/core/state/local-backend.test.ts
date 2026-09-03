@@ -58,8 +58,9 @@ describe("LocalStateBackend durable task settlement", () => {
     });
     const recovered = new LocalStateBackend({
       checkpointPath,
-      onTimerExpired: () => {
+      onTimerExpired: (entry) => {
         expect(initialized).toBe(true);
+        expect(entry.instanceId).toBe("default");
         resolveExpired();
       },
     });

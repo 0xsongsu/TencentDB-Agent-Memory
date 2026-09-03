@@ -99,10 +99,10 @@ export class LocalStateBackend implements IStateBackend {
     waiter.resolve(await this.takeTask());
   }
 
-  private armTimer(key: string, member: string, fireAtMs: number): void {
+  private armTimer(instanceId: string, key: string, member: string, fireAtMs: number): void {
     const delay = Math.max(0, fireAtMs - Date.now());
     const handle = this.onTimerExpired
-      ? setTimeout(() => { void this.fireTimer(key, { member, fireAtMs }); }, delay)
+      ? setTimeout(() => { void this.fireTimer(key, { instanceId, member, fireAtMs }); }, delay)
       : undefined;
     if (handle) handle.unref();
     this.timers.set(key, { member, fireAtMs, handle });
@@ -189,7 +189,7 @@ export class LocalStateBackend implements IStateBackend {
     const existing = this.timers.get(key);
     if (existing?.handle) clearTimeout(existing.handle);
 
-    this.armTimer(key, member, fireAtMs);
+    this.armTimer(instanceId, key, member, fireAtMs);
     await this.persist();
   }
 
@@ -213,7 +213,7 @@ export class LocalStateBackend implements IStateBackend {
     const expired: TimerEntry[] = [];
     for (const [key, timer] of this.timers) {
       if (key.startsWith(prefix) && timer.fireAtMs <= nowMs) {
-        expired.push({ member: timer.member, fireAtMs: timer.fireAtMs });
+        expired.push({ instanceId, member: timer.member, fireAtMs: timer.fireAtMs });
       }
     }
     for (const entry of expired) {
@@ -305,10 +305,12 @@ export class LocalStateBackend implements IStateBackend {
   async captureAtomic(params: CaptureAtomicParams): Promise<CaptureAtomicResult> {
     const { instanceId, sessionId, teamId, agentId, messageJson, threshold, fireAtMs, timerMember, taskPayload, nowMs, rounds } = params;
 
-    const bufferKey = this.k(instanceId, sessionId, teamId, agentId);
-    const buffer = this.buffers.get(bufferKey) ?? [];
-    buffer.push(messageJson);
-    this.buffers.set(bufferKey, buffer);
+    if (messageJson) {
+      const bufferKey = this.k(instanceId, sessionId, teamId, agentId);
+      const buffer = this.buffers.get(bufferKey) ?? [];
+      buffer.push(messageJson);
+      this.buffers.set(bufferKey, buffer);
+    }
 
     const stateKey = this.k(instanceId, sessionId, teamId, agentId);
     let state = this.sessionStates.get(stateKey);
@@ -335,7 +337,7 @@ export class LocalStateBackend implements IStateBackend {
     const timerKey = `${instanceId}:${timerMember}`;
     const existing = this.timers.get(timerKey);
     if (existing?.handle) clearTimeout(existing.handle);
-    this.armTimer(timerKey, timerMember, fireAtMs);
+    this.armTimer(instanceId, timerKey, timerMember, fireAtMs);
     await this.persist();
     return { triggered: false, conversationCount: state.conversation_count };
   }
@@ -408,7 +410,8 @@ export class LocalStateBackend implements IStateBackend {
     }
     await this.persist();
     for (const [key, timer] of snapshot.timers) {
-      this.armTimer(key, timer.member, timer.fireAtMs);
+      const instanceId = key.slice(0, key.indexOf(":"));
+      this.armTimer(instanceId, key, timer.member, timer.fireAtMs);
     }
   }
 
