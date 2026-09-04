@@ -426,7 +426,7 @@ export function resolveIsolation(
   if (!sessionId) missing.push("session_id");
 
   const ph = opts.legacyCompatMode ? (opts.legacyPlaceholder ?? DEFAULT_ISOLATION_ID) : DEFAULT_ISOLATION_ID;
-  const ctx = { ...(teamId ? { teamId } : {}), userId: userId || ph, agentId: agentId || ph, sessionId: sessionId || ph, ...(taskId ? { taskId } : {}) };
+  const ctx = { ...(teamId ? { teamId } : {}), userId: userId || ph, agentId: agentId || ph, sessionId: sessionId || ph, ...(taskId !== undefined ? { taskId } : {}) };
   return { ok: true, ctx };
 }
 

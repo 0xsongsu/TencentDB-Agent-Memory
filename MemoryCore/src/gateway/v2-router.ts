@@ -873,7 +873,7 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
   if (iso?.teamId) filtered = filtered.filter((r) => r.team_id === iso.teamId);
   if (iso?.userId) filtered = filtered.filter((r) => r.user_id === iso.userId);
   if (iso?.agentId) filtered = filtered.filter((r) => r.agent_id === iso.agentId);
-  if (iso?.taskId) filtered = filtered.filter((r) => r.task_id === iso.taskId);
+  if (iso?.taskId !== undefined) filtered = filtered.filter((r) => r.task_id === iso.taskId);
   if (time_start) { const ms = new Date(time_start).getTime(); filtered = filtered.filter((r) => r.timestamp >= ms); }
   if (time_end) { const ms = new Date(time_end).getTime(); filtered = filtered.filter((r) => r.timestamp <= ms); }
   const total = filtered.length;
@@ -954,7 +954,7 @@ async function handleConversationCount(body: unknown, _auth: V2AuthContext, requ
   if (iso?.teamId) filtered = filtered.filter((r) => r.team_id === iso.teamId);
   if (iso?.userId) filtered = filtered.filter((r) => r.user_id === iso.userId);
   if (iso?.agentId) filtered = filtered.filter((r) => r.agent_id === iso.agentId);
-  if (iso?.taskId) filtered = filtered.filter((r) => r.task_id === iso.taskId);
+  if (iso?.taskId !== undefined) filtered = filtered.filter((r) => r.task_id === iso.taskId);
   if (time_start) { const ms = new Date(time_start).getTime(); filtered = filtered.filter((r) => r.timestamp >= ms); }
   if (time_end) { const ms = new Date(time_end).getTime(); filtered = filtered.filter((r) => r.timestamp <= ms); }
   return successEnvelope<CountData>({ total: filtered.length }, requestId);
@@ -974,7 +974,7 @@ async function handleConversationSearch(body: unknown, auth: V2AuthContext, requ
     ...(iso.teamId ? { teamId: iso.teamId } : {}),
     ...(iso.userId ? { userId: iso.userId } : {}),
     ...(iso.agentId ? { agentId: iso.agentId } : {}),
-    ...(iso.taskId ? { taskId: iso.taskId } : {}),
+    ...(iso.taskId !== undefined ? { taskId: iso.taskId } : {}),
     // 不传 sessionId：全局搜索不应被默认 sessionId 限制
   } : undefined;
   const result = await executeConversationSearch({
@@ -1120,11 +1120,17 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
   // re-derive them. If the caller supplied an isolation triple that does NOT
   // match the existing row, we treat it as a permission denial.
   const iso = deps.requestIsolation;
+  if (iso?.teamId && record.team_id && record.team_id !== iso.teamId) {
+    return errorEnvelope(403, `Atomic note ${id} belongs to a different team`, requestId);
+  }
   if (iso?.userId && record.user_id && record.user_id !== iso.userId) {
     return errorEnvelope(403, `Atomic note ${id} belongs to a different user`, requestId);
   }
   if (iso?.agentId && record.agent_id && record.agent_id !== iso.agentId) {
     return errorEnvelope(403, `Atomic note ${id} belongs to a different agent`, requestId);
+  }
+  if (iso?.taskId !== undefined && (record.task_id ?? "") !== iso.taskId) {
+    return errorEnvelope(403, `Atomic note ${id} belongs to a different task`, requestId);
   }
   const updatedVersion = (record.version ?? 0) + 1;
   const updated: MemoryRecord = {
@@ -1260,7 +1266,7 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
   if (iso?.teamId) filtered = filtered.filter((r) => r.team_id === iso.teamId);
   if (iso?.userId) filtered = filtered.filter((r) => r.user_id === iso.userId);
   if (iso?.agentId) filtered = filtered.filter((r) => r.agent_id === iso.agentId);
-  if (iso?.taskId) filtered = filtered.filter((r) => r.task_id === iso.taskId);
+  if (iso?.taskId !== undefined) filtered = filtered.filter((r) => r.task_id === iso.taskId);
   if (time_start) filtered = filtered.filter((r) => r.updated_time >= time_start);
   if (time_end) filtered = filtered.filter((r) => r.updated_time <= time_end);
   const total = filtered.length;
@@ -1322,7 +1328,7 @@ async function handleAtomicSearch(body: unknown, auth: V2AuthContext, requestId:
     ...(iso.teamId ? { teamId: iso.teamId } : {}),
     ...(iso.userId ? { userId: iso.userId } : {}),
     ...(iso.agentId ? { agentId: iso.agentId } : {}),
-    ...(iso.taskId ? { taskId: iso.taskId } : {}),
+    ...(iso.taskId !== undefined ? { taskId: iso.taskId } : {}),
     // 不传 sessionId：L1 召回应跨 session（agent 维度）
   } : undefined;
   const result = await executeMemorySearch({
@@ -1414,7 +1420,7 @@ async function handleAtomicDelete(body: unknown, auth: V2AuthContext, requestId:
     ...(iso.teamId ? { teamId: iso.teamId } : {}),
     ...(iso.userId ? { userId: iso.userId } : {}),
     ...(iso.agentId ? { agentId: iso.agentId } : {}),
-    ...(iso.taskId ? { taskId: iso.taskId } : {}),
+    ...(iso.taskId !== undefined ? { taskId: iso.taskId } : {}),
     // 不传 sessionId：按 id 删除不应被默认 sessionId 限制
   } : undefined;
   let deletedCount = 0;
