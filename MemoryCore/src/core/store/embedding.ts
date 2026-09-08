@@ -94,6 +94,15 @@ export interface EmbeddingService {
   close?(): void | Promise<void>;
 }
 
+export function embeddingSearchQuery(
+  service: EmbeddingService,
+  query: string,
+): string {
+  return service.getProviderInfo().model.toLowerCase().includes("qwen3-embedding")
+    ? `Instruct: Given a user question, retrieve the best matching memory passage\nQuery: ${query}`
+    : query;
+}
+
 /**
  * Whether `svc` can produce client-side query/document vectors via `embed()`.
  *
@@ -434,6 +443,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
   private readonly maxInputChars?: number;
   private readonly timeoutMs: number;
   private readonly logger?: Logger;
+  private readonly inFlight = new Map<string, Promise<Float32Array>>();
 
   constructor(config: OpenAIEmbeddingConfig, logger?: Logger) {
     if (!config.apiKey) {
@@ -478,9 +488,15 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     // nothing to do — remote API is stateless
   }
 
-  async embed(text: string, options?: EmbeddingCallOptions): Promise<Float32Array> {
-    const [result] = await this.embedBatch([text], options);
-    return result;
+  embed(text: string, options?: EmbeddingCallOptions): Promise<Float32Array> {
+    const key = `${options?.timeoutMs ?? this.timeoutMs}\u0000${text}`;
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+    const pending = this.embedBatch([text], options).then(([result]) => result);
+    this.inFlight.set(key, pending);
+    return pending.finally(() => {
+      if (this.inFlight.get(key) === pending) this.inFlight.delete(key);
+    });
   }
 
   async embedBatch(texts: string[], options?: EmbeddingCallOptions): Promise<Float32Array[]> {

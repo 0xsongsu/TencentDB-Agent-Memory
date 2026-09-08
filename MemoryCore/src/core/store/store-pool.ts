@@ -232,7 +232,63 @@ export class StorePool {
 
     // 初始化 Store (建表/检查连接)
     try {
-      await pooledStore.store.init();
+      const embeddingEnabled =
+        this.memoryCfg.embedding.enabled &&
+        this.memoryCfg.embedding.provider !== "none";
+      const vectorStore = pooledStore.store;
+      const initResult = await pooledStore.store.init(
+        embeddingEnabled ? pooledStore.embedding.getProviderInfo() : undefined,
+      );
+      if (embeddingEnabled && vectorStore instanceof VectorStore) {
+        const initial = vectorStore.getVectorBackfillStatus();
+        const missingVectors =
+          initial.l0Complete < initial.l0Total ||
+          initial.l1Complete < initial.l1Total;
+        if (initResult.needsReindex || missingVectors) {
+          this.logger.info(
+            `${TAG} Scheduling background vector backfill for ${instanceId}`,
+          );
+          const embedBatch =
+            pooledStore.embedding.getProviderInfo().model ===
+            "qwen3-embedding-0.6b"
+              ? undefined
+              : (texts: string[]) => pooledStore.embedding.embedBatch(texts);
+          void (async () => {
+            let previousMissing = Number.POSITIVE_INFINITY;
+            for (;;) {
+              await vectorStore.reindexAll(
+                (text) => pooledStore.embedding.embed(text),
+                (done, total, layer) => {
+                  if (done === total || done % 160 === 0) {
+                    this.logger.info(
+                      `${TAG} Vector backfill ${instanceId} ${layer}: ${done}/${total}`,
+                    );
+                  }
+                },
+                embedBatch,
+              );
+              const status = vectorStore.getVectorBackfillStatus();
+              const missing =
+                status.l0Total - status.l0Complete +
+                status.l1Total - status.l1Complete;
+              if (missing === 0) {
+                this.logger.info(
+                  `${TAG} Vector backfill complete for ${instanceId}: L0=${status.l0Complete}/${status.l0Total}, L1=${status.l1Complete}/${status.l1Total}`,
+                );
+                return;
+              }
+              if (missing >= previousMissing) {
+                await new Promise((resolve) => setTimeout(resolve, 30_000));
+              }
+              previousMissing = missing;
+            }
+          })().catch((error) => {
+            this.logger.error(
+              `${TAG} Vector backfill stopped for ${instanceId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }
+      }
     } catch (e) {
       this.logger.warn(`${TAG} Store init failed for ${instanceId}: ${e}`);
     }

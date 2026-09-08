@@ -58,7 +58,7 @@ import type {
   AuditEntry,
   AuditQueryFilter,
 } from "../types.js";
-import { DEFAULT_ISOLATION_ID, rowMatchesIsolation } from "../types.js";
+import { buildIsolationWhere, DEFAULT_ISOLATION_ID, rowMatchesIsolation } from "../types.js";
 import { SKILLS_DDL, SKILL_FTS_DDL } from "../../skill/skill-store-ddl.js";
 import type { Logger } from "../../types.js";
 import type {
@@ -102,6 +102,13 @@ export interface VectorSearchResult {
   agent_id: string;
   /** Raw metadata JSON string (e.g., contains activity_start_time / activity_end_time for episodic) */
   metadata_json: string;
+}
+
+export function resolveSqliteVecLoadablePath(loadablePath: string): string {
+  return loadablePath.replace(
+    `${path.sep}app.asar${path.sep}`,
+    `${path.sep}app.asar.unpacked${path.sep}`,
+  );
 }
 
 /** L0 single-message vector search result. */
@@ -267,6 +274,7 @@ export class VectorStore implements IMemoryStore {
   private stmtL0InsertVec?: StatementSync;   // optional — only set when vecTablesReady
   private stmtL0DeleteMeta!: StatementSync;
   private stmtL0GetMeta!: StatementSync;
+  private stmtL0GetVec?: StatementSync;
   private stmtL0SearchVec?: StatementSync;   // optional — only set when vecTablesReady
   /** L0 query for L1 runner: all messages for a session key */
   private stmtL0QueryAll!: StatementSync;
@@ -371,9 +379,13 @@ export class VectorStore implements IMemoryStore {
     if (this.dimensions > 0) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const sqliteVec = require("sqlite-vec");
+        const sqliteVec = require("sqlite-vec") as {
+          getLoadablePath(): string;
+        };
         this.db.enableLoadExtension(true);
-        sqliteVec.load(this.db);
+        this.db.loadExtension(
+          resolveSqliteVecLoadablePath(sqliteVec.getLoadablePath()),
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.logger?.error(
@@ -689,6 +701,7 @@ export class VectorStore implements IMemoryStore {
     if (this.dimensions > 0) {
       this.stmtL0DeleteVec = this.db.prepare("DELETE FROM l0_vec WHERE record_id = ?");
       this.stmtL0InsertVec = this.db.prepare("INSERT INTO l0_vec (record_id, embedding, recorded_at) VALUES (?, ?, ?)");
+      this.stmtL0GetVec = this.db.prepare("SELECT embedding FROM l0_vec WHERE record_id = ?");
     }
     this.stmtL0DeleteMeta = this.db.prepare("DELETE FROM l0_conversations WHERE record_id = ?");
 
@@ -1339,7 +1352,8 @@ export class VectorStore implements IMemoryStore {
       // NOTE: "AND distance IS NOT NULL" is NOT usable because vec0 does not
       // support that constraint — it causes an empty result set.
       const ZERO_VEC_BUFFER = 10;
-      const retrieveCount = filter ? Math.max(topK * 5, topK + ZERO_VEC_BUFFER) : topK + ZERO_VEC_BUFFER;
+      const { clause, params } = buildIsolationWhere(filter, "m.");
+      const retrieveCount = topK + ZERO_VEC_BUFFER;
 
       this.logger?.debug?.(
         `${TAG} [L1-search] START topK=${topK}, retrieveCount=${retrieveCount}, ` +
@@ -1347,10 +1361,17 @@ export class VectorStore implements IMemoryStore {
         `queryNorm=${Math.sqrt(Array.from(queryEmbedding).reduce((s, v) => s + v * v, 0)).toFixed(4)}`,
       );
 
-      const rows = this.stmtSearchVec!.all(
-        Buffer.from(queryEmbedding.buffer),
-        retrieveCount,
-      ) as Array<{ record_id: string; distance: number }>;
+      const embedding = Buffer.from(queryEmbedding.buffer);
+      const rows = (clause
+        ? this.db.prepare(`
+            SELECT v.record_id, vec_distance_cosine(v.embedding, ?) AS distance
+            FROM l1_vec v
+            JOIN l1_records m ON m.record_id = v.record_id
+            WHERE ${clause}
+            ORDER BY distance
+            LIMIT ?
+          `).all(embedding, ...params, retrieveCount)
+        : this.stmtSearchVec!.all(embedding, retrieveCount)) as Array<{ record_id: string; distance: number }>;
 
       this.logger?.debug?.(`${TAG} [L1-search] vec0 returned ${rows.length} candidate(s)`);
 
@@ -1647,7 +1668,8 @@ export class VectorStore implements IMemoryStore {
       return [];
     }
     try {
-      const { sessionKey, sessionId, taskId, updatedAfter } = filter ?? {};
+      const { recordIds, sessionKey, sessionId, taskId, updatedAfter } =
+        filter ?? {};
 
       let raw: Record<string, unknown>[];
 
@@ -1676,6 +1698,10 @@ export class VectorStore implements IMemoryStore {
       }
 
       let rows = raw as unknown as L1RecordRow[];
+      if (recordIds?.length) {
+        const ids = new Set(recordIds);
+        rows = rows.filter((row) => ids.has(row.record_id));
+      }
       // Prepared statements above optimize the common session/time predicates.
       // Isolation dimensions are optional and can be combined with any query
       // shape (notably L2 profile queries use teamId+agentId+updatedAfter
@@ -1870,7 +1896,8 @@ export class VectorStore implements IMemoryStore {
       // in KNN results.
       // NOTE: "AND distance IS NOT NULL" is NOT usable because vec0 does not
       // support that constraint — it causes an empty result set.
-      const retrieveCount = filter ? Math.max(topK * 5, topK + VectorStore.ZERO_VEC_BUFFER) : topK + VectorStore.ZERO_VEC_BUFFER;
+      const { clause, params } = buildIsolationWhere(filter, "m.");
+      const retrieveCount = topK + VectorStore.ZERO_VEC_BUFFER;
 
       this.logger?.debug?.(
         `${TAG} [L0-search] START topK=${topK}, retrieveCount=${retrieveCount}, ` +
@@ -1878,10 +1905,17 @@ export class VectorStore implements IMemoryStore {
         `queryNorm=${Math.sqrt(Array.from(queryEmbedding).reduce((s, v) => s + v * v, 0)).toFixed(4)}`,
       );
 
-      const rows = this.stmtL0SearchVec!.all(
-        Buffer.from(queryEmbedding.buffer),
-        retrieveCount,
-      ) as Array<{ record_id: string; distance: number }>;
+      const embedding = Buffer.from(queryEmbedding.buffer);
+      const rows = (clause
+        ? this.db.prepare(`
+            SELECT v.record_id, vec_distance_cosine(v.embedding, ?) AS distance
+            FROM l0_vec v
+            JOIN l0_conversations m ON m.record_id = v.record_id
+            WHERE ${clause}
+            ORDER BY distance
+            LIMIT ?
+          `).all(embedding, ...params, retrieveCount)
+        : this.stmtL0SearchVec!.all(embedding, retrieveCount)) as Array<{ record_id: string; distance: number }>;
 
       this.logger?.debug?.(`${TAG} [L0-search] vec0 returned ${rows.length} candidate(s)`);
 
@@ -2149,6 +2183,64 @@ export class VectorStore implements IMemoryStore {
     }
   }
 
+  getVectorBackfillStatus(): {
+    l0Total: number;
+    l0Complete: number;
+    l1Total: number;
+    l1Complete: number;
+  } {
+    const count = (table: string): number =>
+      (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
+        count: number;
+      }).count;
+    return {
+      l0Total: count("l0_conversations"),
+      l0Complete: count("l0_vec"),
+      l1Total: count("l1_records"),
+      l1Complete: count("l1_vec"),
+    };
+  }
+
+  private getMissingL1Texts(): Array<{
+    record_id: string;
+    content: string;
+    updated_time: string;
+  }> {
+    return this.db
+      .prepare(`
+        SELECT r.record_id, r.content, r.updated_time
+        FROM l1_records r
+        LEFT JOIN l1_vec v ON v.record_id = r.record_id
+        WHERE v.record_id IS NULL
+        ORDER BY r.record_id
+      `)
+      .all() as Array<{
+        record_id: string;
+        content: string;
+        updated_time: string;
+      }>;
+  }
+
+  private getMissingL0Texts(): Array<{
+    record_id: string;
+    message_text: string;
+    recorded_at: string;
+  }> {
+    return this.db
+      .prepare(`
+        SELECT r.record_id, r.message_text, r.recorded_at
+        FROM l0_conversations r
+        LEFT JOIN l0_vec v ON v.record_id = r.record_id
+        WHERE v.record_id IS NULL
+        ORDER BY r.record_id
+      `)
+      .all() as Array<{
+        record_id: string;
+        message_text: string;
+        recorded_at: string;
+      }>;
+  }
+
   /**
    * Re-embed all existing L1 and L0 texts with a new embedding function.
    *
@@ -2163,6 +2255,7 @@ export class VectorStore implements IMemoryStore {
   async reindexAll(
     embedFn: (text: string) => Promise<Float32Array>,
     onProgress?: (done: number, total: number, layer: "L1" | "L0") => void,
+    embedBatchFn?: (texts: string[]) => Promise<Float32Array[]>,
   ): Promise<{ l1Count: number; l0Count: number }> {
     if (this.degraded || !this.vecTablesReady) {
       if (this.degraded) this.logger?.warn(`${TAG} reindexAll skipped: VectorStore is in degraded mode`);
@@ -2171,52 +2264,127 @@ export class VectorStore implements IMemoryStore {
 
     try {
       // ── Re-embed L1 ──
-      const l1Rows = this.getAllL1Texts();
+      const l1Rows = this.getMissingL1Texts();
       let l1Done = 0;
-      for (const { record_id, content, updated_time } of l1Rows) {
+      const batchSize = embedBatchFn ? 16 : 1;
+      for (let offset = 0; offset < l1Rows.length; offset += batchSize) {
+        const batch = l1Rows.slice(offset, offset + batchSize);
+        let completed = 0;
         try {
-          const embedding = await embedFn(content);
-          // Wrap delete+insert in a transaction to prevent orphan vectors
+          let embeddings: Array<Float32Array | null>;
+          try {
+            embeddings = embedBatchFn
+              ? await embedBatchFn(batch.map((row) => row.content))
+              : [await embedFn(batch[0].content)];
+          } catch (error) {
+            this.logger?.warn?.(
+              `${TAG} reindex L1 batch failed at ${offset}; retrying individually: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            const failures: string[] = [];
+            embeddings = await Promise.all(
+              batch.map(async (row) => {
+                try {
+                  return await embedFn(row.content);
+                } catch (individualError) {
+                  failures.push(
+                    `${row.record_id}: ${individualError instanceof Error ? individualError.message : String(individualError)}`,
+                  );
+                  return null;
+                }
+              }),
+            );
+            if (failures.length > 0) {
+              this.logger?.warn?.(
+                `${TAG} reindex L1 individual failures ${failures.length}/${batch.length}; first=${failures[0]}`,
+              );
+            }
+          }
           this.db.exec("BEGIN");
           try {
-            this.stmtDeleteVec!.run(record_id);
-            this.stmtInsertVec!.run(record_id, Buffer.from(embedding.buffer), updated_time);
+            for (const [index, row] of batch.entries()) {
+              const embedding = embeddings[index];
+              if (!embedding) continue;
+              this.stmtDeleteVec!.run(row.record_id);
+              this.stmtInsertVec!.run(
+                row.record_id,
+                Buffer.from(embedding.buffer),
+                row.updated_time,
+              );
+            }
             this.db.exec("COMMIT");
+            completed = embeddings.filter(Boolean).length;
           } catch (txErr) {
             try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
             throw txErr;
           }
         } catch (err) {
           this.logger?.warn?.(
-            `${TAG} reindex L1 skip ${record_id}: ${err instanceof Error ? err.message : String(err)}`,
+            `${TAG} reindex L1 batch skip at ${offset}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
-        l1Done++;
+        l1Done += completed;
         onProgress?.(l1Done, l1Rows.length, "L1");
       }
 
       // ── Re-embed L0 ──
-      const l0Rows = this.getAllL0Texts();
+      const l0Rows = this.getMissingL0Texts();
       let l0Done = 0;
-      for (const { record_id, message_text, recorded_at } of l0Rows) {
+      for (let offset = 0; offset < l0Rows.length; offset += batchSize) {
+        const batch = l0Rows.slice(offset, offset + batchSize);
+        let completed = 0;
         try {
-          const embedding = await embedFn(message_text);
-          // Wrap delete+insert in a transaction to prevent orphan vectors
+          let embeddings: Array<Float32Array | null>;
+          try {
+            embeddings = embedBatchFn
+              ? await embedBatchFn(batch.map((row) => row.message_text))
+              : [await embedFn(batch[0].message_text)];
+          } catch (error) {
+            this.logger?.warn?.(
+              `${TAG} reindex L0 batch failed at ${offset}; retrying individually: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            const failures: string[] = [];
+            embeddings = await Promise.all(
+              batch.map(async (row) => {
+                try {
+                  return await embedFn(row.message_text);
+                } catch (individualError) {
+                  failures.push(
+                    `${row.record_id}: ${individualError instanceof Error ? individualError.message : String(individualError)}`,
+                  );
+                  return null;
+                }
+              }),
+            );
+            if (failures.length > 0) {
+              this.logger?.warn?.(
+                `${TAG} reindex L0 individual failures ${failures.length}/${batch.length}; first=${failures[0]}`,
+              );
+            }
+          }
           this.db.exec("BEGIN");
           try {
-            this.stmtL0DeleteVec!.run(record_id);
-            this.stmtL0InsertVec!.run(record_id, Buffer.from(embedding.buffer), recorded_at);
+            for (const [index, row] of batch.entries()) {
+              const embedding = embeddings[index];
+              if (!embedding) continue;
+              this.stmtL0DeleteVec!.run(row.record_id);
+              this.stmtL0InsertVec!.run(
+                row.record_id,
+                Buffer.from(embedding.buffer),
+                row.recorded_at,
+              );
+            }
             this.db.exec("COMMIT");
+            completed = embeddings.filter(Boolean).length;
           } catch (txErr) {
             try { this.db.exec("ROLLBACK"); } catch { /* ignore */ }
             throw txErr;
           }
         } catch (err) {
           this.logger?.warn?.(
-            `${TAG} reindex L0 skip ${record_id}: ${err instanceof Error ? err.message : String(err)}`,
+            `${TAG} reindex L0 batch skip at ${offset}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
-        l0Done++;
+        l0Done += completed;
         onProgress?.(l0Done, l0Rows.length, "L0");
       }
 
@@ -3007,8 +3175,20 @@ export class VectorStore implements IMemoryStore {
   searchL1Fts(ftsQuery: string, limit = 20, filter?: IsolationFilter): FtsSearchResult[] {
     if (this.degraded || !this.ftsAvailable) return [];
     try {
-      const retrieveLimit = filter ? Math.max(limit * 5, limit) : limit;
-      const rows = this.stmtL1FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
+      const { clause, params } = buildIsolationWhere(filter);
+      const rows = (clause
+        ? this.db.prepare(`
+            SELECT record_id, content_original AS content, type, priority, scene_name,
+                   session_key, session_id, team_id, task_id, user_id, agent_id, version,
+                   timestamp_str, timestamp_start, timestamp_end,
+                   metadata_json,
+                   bm25(l1_fts) AS rank
+            FROM l1_fts
+            WHERE l1_fts MATCH ? AND ${clause}
+            ORDER BY rank ASC
+            LIMIT ?
+          `).all(ftsQuery, ...params, limit)
+        : this.stmtL1FtsSearch.all(ftsQuery, limit)) as Array<{
         record_id: string;
         content: string;
         type: string;
@@ -3067,11 +3247,31 @@ export class VectorStore implements IMemoryStore {
    *
    * **Fault-tolerant**: returns an empty array on any error.
    */
-  searchL0Fts(ftsQuery: string, limit = VectorStore.FTS_DEFAULT_LIMIT, filter?: IsolationFilter): L0FtsSearchResult[] {
+  searchL0Fts(
+    ftsQuery: string,
+    limit = VectorStore.FTS_DEFAULT_LIMIT,
+    filter?: IsolationFilter,
+    queryEmbedding?: Float32Array,
+  ): L0FtsSearchResult[] {
     if (this.degraded || !this.ftsAvailable) return [];
     try {
-      const retrieveLimit = filter ? Math.max(limit * 5, limit) : limit;
-      const rows = this.stmtL0FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
+      const hasYearMonthAnchors =
+        /"20\d{2}"/.test(ftsQuery) && /"(?:0[1-9]|1[0-2])"/.test(ftsQuery);
+      const retrieveLimit = queryEmbedding
+        ? Math.max(hasYearMonthAnchors ? 2_000 : 100, limit)
+        : limit;
+      const { clause, params } = buildIsolationWhere(filter);
+      const rows = (clause
+        ? this.db.prepare(`
+            SELECT record_id, message_text_original AS message_text,
+                   session_key, session_id, team_id, task_id, user_id, agent_id, role, recorded_at, timestamp,
+                   bm25(l0_fts) AS rank
+            FROM l0_fts
+            WHERE l0_fts MATCH ? AND ${clause}
+            ORDER BY rank ASC
+            LIMIT ?
+          `).all(ftsQuery, ...params, retrieveLimit)
+        : this.stmtL0FtsSearch.all(ftsQuery, retrieveLimit)) as Array<{
         record_id: string;
         message_text: string;
         session_key: string;
@@ -3086,8 +3286,29 @@ export class VectorStore implements IMemoryStore {
         rank: number;
       }>;
 
-      return rows
-        .filter((r) => rowMatchesIsolation(r, filter))
+      const filteredRows = rows.filter((r) => rowMatchesIsolation(r, filter));
+      let rankedRows = filteredRows;
+      if (queryEmbedding && this.stmtL0GetVec) {
+        rankedRows = filteredRows
+          .map((row) => {
+            const vectorRow = this.stmtL0GetVec!.get(row.record_id) as { embedding: Uint8Array } | undefined;
+            if (!vectorRow) return { row, semanticScore: -1 };
+            const vector = new Float32Array(
+              vectorRow.embedding.buffer,
+              vectorRow.embedding.byteOffset,
+              vectorRow.embedding.byteLength / Float32Array.BYTES_PER_ELEMENT,
+            );
+            let dot = 0;
+            for (let index = 0; index < queryEmbedding.length; index += 1) {
+              dot += queryEmbedding[index] * vector[index];
+            }
+            return { row, semanticScore: dot };
+          })
+          .sort((a, b) => b.semanticScore - a.semanticScore)
+          .map(({ row }) => row);
+      }
+
+      return rankedRows
         .slice(0, limit)
         .map((r) => ({
           record_id: r.record_id,

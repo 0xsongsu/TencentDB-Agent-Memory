@@ -31,6 +31,10 @@ export interface RecallL1CandidatesParams {
   /** Precomputed query vector; skips embed() on the client-vector path. */
   queryEmbedding?: Float32Array;
   embeddingTimeoutMs?: number;
+  /** Search-specific query instruction; FTS still uses the original query. */
+  embeddingQuery?: string;
+  /** Reserve half the result slots for each source; dedup retains RRF by default. */
+  hybridLimit?: number;
   /** Log prefix so search/dedup keep their existing tag in logs. */
   logTag?: string;
 }
@@ -86,6 +90,7 @@ export async function recallL1Candidates(
       embeddingTimeoutMs,
       logger,
       tag,
+      params.embeddingQuery,
     ),
   ]);
 
@@ -104,9 +109,25 @@ export async function recallL1Candidates(
   }
 
   if (strategy === "hybrid") {
-    const merged = rrfMergeL1Hits(ftsHits, vecHits);
+    let merged: L1SearchResult[];
+    if (params.hybridLimit !== undefined) {
+      const ftsSlots = Math.max(1, Math.floor(params.hybridLimit * 0.5));
+      const vecSlots = params.hybridLimit - ftsSlots;
+      const ranked = [
+        ...ftsHits.slice(0, ftsSlots), ...vecHits.slice(0, vecSlots),
+        ...ftsHits.slice(ftsSlots), ...vecHits.slice(vecSlots),
+      ];
+      const seen = new Set<string>();
+      merged = ranked.filter((hit) => {
+        if (seen.has(hit.record_id)) return false;
+        seen.add(hit.record_id);
+        return true;
+      });
+    } else {
+      merged = rrfMergeL1Hits(ftsHits, vecHits);
+    }
     logger?.debug?.(
-      `${tag} [hybrid] RRF merged: fts=${ftsHits.length}, vec=${vecHits.length} → ${merged.length} unique`,
+      `${tag} [hybrid] ${params.hybridLimit === undefined ? "RRF" : "Slot"} merged: fts=${ftsHits.length}, vec=${vecHits.length} → ${merged.length} unique`,
     );
     return { hits: merged, strategy };
   }
@@ -205,6 +226,7 @@ async function recallVector(
   embeddingTimeoutMs: number | undefined,
   logger: Logger | undefined,
   tag: string,
+  embeddingQuery = query,
 ): Promise<L1SearchResult[]> {
   if (!hasClientEmbedding(embeddingService) && !(queryEmbedding && queryEmbedding.length > 0)) {
     return [];
@@ -214,8 +236,8 @@ async function recallVector(
     if (!vec) {
       logger?.debug?.(`${tag} [hybrid-vec] Generating query embedding...`);
       vec = embeddingTimeoutMs != null
-        ? await embeddingService!.embed(query, { timeoutMs: embeddingTimeoutMs })
-        : await embeddingService!.embed(query);
+        ? await embeddingService!.embed(embeddingQuery, { timeoutMs: embeddingTimeoutMs })
+        : await embeddingService!.embed(embeddingQuery);
     }
     if (!vec || vec.length === 0) {
       logger?.debug?.(`${tag} [hybrid-vec] Empty query embedding, skipping vector path`);

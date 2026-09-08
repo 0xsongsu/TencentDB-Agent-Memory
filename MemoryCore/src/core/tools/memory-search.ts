@@ -11,7 +11,7 @@
  */
 
 import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/types.js";
-import { hasClientEmbedding, type EmbeddingService } from "../store/embedding.js";
+import { embeddingSearchQuery, hasClientEmbedding, type EmbeddingService } from "../store/embedding.js";
 import type { Logger } from "../types.js";
 import { recallL1Candidates } from "./l1-candidate-recall.js";
 
@@ -33,6 +33,7 @@ export interface MemorySearchResultItem {
   version: number;
   created_at: string;
   updated_at: string;
+  metadata_json: string;
 }
 
 export interface MemorySearchResult {
@@ -60,6 +61,7 @@ function toSearchItem(r: L1SearchResult): MemorySearchResultItem {
     version: r.version ?? 0,
     created_at: r.timestamp_start,
     updated_at: r.timestamp_end,
+    metadata_json: r.metadata_json,
   };
 }
 
@@ -135,6 +137,8 @@ export async function executeMemorySearch(params: {
   const recalled = await recallL1Candidates({
     query,
     topK: candidateK,
+    hybridLimit: limit,
+    embeddingQuery: embeddingService ? embeddingSearchQuery(embeddingService, query) : query,
     vectorStore,
     embeddingService,
     logger,
