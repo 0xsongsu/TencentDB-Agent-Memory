@@ -138,7 +138,7 @@ export class SceneExtractor {
    * @param memories - Array of raw memory records from the API
    * @returns Extraction result with count and success flag
    */
-  async extract(memories: Array<{ content: string; created_at: string; id?: string }>): Promise<ExtractionResult> {
+  async extract(memories: Array<{ content: string; created_at: string; id?: string; updated_at?: string; type?: string; metadata?: Record<string, unknown>; source_message_ids?: string[]; scene_name?: string; source_conversation_id?: string }>): Promise<ExtractionResult> {
     const extractStartMs = Date.now();
     this.logger?.info(`${TAG} extract() start: ${memories.length} memories`);
 
@@ -223,9 +223,15 @@ export class SceneExtractor {
     const promptStartMs = Date.now();
     const memoriesJson = JSON.stringify(
       memories.map((m) => ({
+        scene_name: m.scene_name,
+        source_conversation_id: m.source_conversation_id,
         content: m.content,
         created_at: m.created_at,
         id: m.id ?? "",
+        updated_at: m.updated_at,
+        type: m.type,
+        metadata: m.metadata,
+        source_message_ids: m.source_message_ids,
       })),
       null,
       2,
@@ -242,7 +248,9 @@ export class SceneExtractor {
       maxScenes: this.maxScenes,
       promptMode: this.promptMode,
     });
-    const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt);
+    const writeFilenamePrefix = this.promptMode === "chat" ? (memories.every((memory) => (memory.metadata?.scope === "task" || memory.metadata?.source === "activity")) ? "task-" : "user-") : undefined;
+    const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt) + (writeFilenamePrefix
+      ? `\n本批只允许写入或编辑 ${writeFilenamePrefix} 开头的场景文件。其他文件只读，不得删除、重写或搬移；新文件也必须使用此前缀。` : "");
     this.logger?.debug?.(`${TAG} extract() prompt built: ${userPrompt.length} chars (${Date.now() - promptStartMs}ms)`);
 
     // Phase 4: Run LLM agent (sandboxed to scene_blocks/)
@@ -263,6 +271,7 @@ export class SceneExtractor {
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS
         storage: this.storage,
         storagePrefix: this.storage ? StoragePaths.sceneBlocksDir : undefined,
+        writeFilenamePrefix,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;
@@ -389,6 +398,20 @@ export class SceneExtractor {
     const syncStartMs = Date.now();
     await syncSceneIndex(this.dataDir, this.storage);
     this.logger?.debug?.(`${TAG} extract() scene index synced: ${Date.now() - syncStartMs}ms`);
+
+    if (this.promptMode === "chat") {
+      const finalIndex = await readSceneIndex(this.dataDir, this.storage);
+      const sourceText = (await Promise.all(finalIndex.map(async (entry) => this.storage
+        ? await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${entry.filename}`)
+        : await (await import("node:fs/promises")).readFile((await import("node:path")).join(sceneBlocksDir, entry.filename), "utf-8")))).join("\n");
+      for (const memory of memories) {
+        if (memory.metadata?.evidence_version !== 1) continue;
+        const sources = memory.source_message_ids ?? [];
+        if (!(memory.id && sourceText.includes(memory.id)) && !(sources.length && sources.every((id) => sourceText.includes(id)))) {
+          throw new Error(`L2 omitted verified memory ${memory.id}; extraction cursor must not advance`);
+        }
+      }
+    }
 
     // Phase 7: Update persona.md navigation (GAP-4 fix)
     const navStartMs = Date.now();

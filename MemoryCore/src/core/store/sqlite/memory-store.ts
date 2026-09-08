@@ -1747,6 +1747,13 @@ export class VectorStore implements IMemoryStore {
       return false;
     }
     try {
+      const previous = this.stmtL0GetMeta.get(record.id) as { message_text: string; timestamp: number; role: string; recorded_at: string; team_id: string; user_id: string; agent_id: string; task_id: string; session_id: string } | undefined;
+      if (previous && previous.message_text === record.messageText && previous.timestamp === record.timestamp &&
+        previous.role === record.role && previous.team_id === (record.teamId || DEFAULT_ISOLATION_ID) &&
+        previous.user_id === (record.userId || DEFAULT_ISOLATION_ID) && previous.agent_id === (record.agentId || DEFAULT_ISOLATION_ID) &&
+        previous.task_id === (record.taskId || "") && previous.session_id === (record.sessionId || DEFAULT_ISOLATION_ID)) {
+        record = { ...record, recordedAt: previous.recorded_at };
+      }
       const skipVec = !embedding || embedding.every(v => v === 0) || !this.vecTablesReady;
 
       this.logger?.debug?.(
@@ -2430,6 +2437,13 @@ export class VectorStore implements IMemoryStore {
         rows = this.stmtL0QueryAfter.all(sessionKey, afterRecordedAtIso, limit) as Array<Record<string, unknown>>;
       } else {
         rows = this.stmtL0QueryAll.all(sessionKey, limit) as Array<Record<string, unknown>>;
+      }
+
+      // A timestamp cursor must consume every row at its boundary, even across LIMIT.
+      if (rows.length === limit && rows.length > 0) {
+        const boundary = rows[rows.length - 1].recorded_at;
+        const boundaryRows = this.db.prepare("SELECT * FROM l0_conversations WHERE session_key = ? AND recorded_at = ? ORDER BY timestamp ASC, record_id ASC").all(sessionKey, boundary as string) as Array<Record<string, unknown>>;
+        rows = [...rows.filter((row) => row.recorded_at !== boundary), ...boundaryRows];
       }
 
       this.logger?.info(

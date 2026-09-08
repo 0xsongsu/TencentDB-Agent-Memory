@@ -507,11 +507,11 @@ export class CheckpointManager {
   // Persona methods (L3)
   // ============================
 
-  async markPersonaGenerated(totalProcessed: number): Promise<void> {
+  async markPersonaGenerated(totalProcessed: number, consumedMemories?: number): Promise<void> {
     await this.mutate((cp) => {
       cp.last_persona_at = totalProcessed;
       cp.last_persona_time = new Date().toISOString();
-      cp.memories_since_last_persona = 0;
+      cp.memories_since_last_persona = consumedMemories === undefined ? 0 : Math.max(0, cp.memories_since_last_persona - consumedMemories);
       cp.request_persona_update = false;
       cp.persona_update_reason = "";
     });
@@ -647,6 +647,10 @@ export class CheckpointManager {
     let regressed = false;
     await this.mutate((cp) => {
       const state = this.getRunnerState(cp, sessionKey);
+      if (cursorRecordedAtMs && cursorRecordedAtMs <= state.last_l1_cursor) {
+        regressed = cursorRecordedAtMs < state.last_l1_cursor;
+        return; // Replay must not increment persona counters twice.
+      }
       if (cursorRecordedAtMs) {
         // P0-2: 单调递增，绝不回退。
         //

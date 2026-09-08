@@ -11,6 +11,7 @@
 
 import { tool, jsonSchema } from "ai";
 import type { StorageAdapter } from "../../core/storage/adapter.js";
+import { stampSceneWrite } from "../../core/scene/scene-format.js";
 
 const TAG = "[memory-tdai] [storage-tools]";
 
@@ -41,7 +42,7 @@ function resolveStorageKey(prefix: string, relativePath: string): string | null 
   const key = `${prefix}${normalized}`;
 
   // Double-check: split and reject any ".." segment
-  if (normalized.split("/").includes("..")) return null;
+  if (normalized.split("/").includes("..") || normalized.split("/").at(-1) === "manual-notes.md") return null;
 
   return key;
 }
@@ -57,6 +58,7 @@ export function createStorageTools(
   storage: StorageAdapter,
   prefix: string,
   logger?: Logger,
+  writeFilenamePrefix?: string,
 ) {
   return {
     read: tool({
@@ -98,10 +100,11 @@ export function createStorageTools(
         required: ["path", "content"],
       }),
       execute: (async (args: { path: string; content: string }) => {
+        if (writeFilenamePrefix && (!args.path.startsWith(writeFilenamePrefix) || /[\\/]/.test(args.path))) return JSON.stringify({ error: `This batch may only write ${writeFilenamePrefix}*.md files.` });
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
-          await storage.writeFile(key, args.content);
+          await storage.writeFile(key, stampSceneWrite(args.content));
           logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(args.content, "utf8")} bytes`);
           return JSON.stringify({ success: true });
         } catch (err) {
@@ -134,6 +137,7 @@ export function createStorageTools(
         required: ["path", "edits"],
       }),
       execute: (async (args: { path: string; edits: Array<{ oldText: string; newText: string }> }) => {
+        if (writeFilenamePrefix && (!args.path.startsWith(writeFilenamePrefix) || /[\\/]/.test(args.path))) return JSON.stringify({ error: `This batch may only edit ${writeFilenamePrefix}*.md files.` });
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         if (!args.edits || args.edits.length === 0) return JSON.stringify({ error: "edits array cannot be empty." });
@@ -155,7 +159,7 @@ export function createStorageTools(
             // of the file on every edit, growing scene blocks exponentially.
             content = content.replace(edit.oldText, () => edit.newText);
           }
-          await storage.writeFile(key, content);
+          await storage.writeFile(key, stampSceneWrite(content));
           logger?.debug?.(
             `${TAG} edit: "${args.path}" → ${args.edits.length} replacement(s), ${Buffer.byteLength(content, "utf8")} bytes`,
           );

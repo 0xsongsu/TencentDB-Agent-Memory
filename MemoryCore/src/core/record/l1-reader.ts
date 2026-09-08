@@ -56,9 +56,9 @@ export async function queryMemoryRecords(
  * Convert a raw SQLite L1RecordRow to a MemoryRecord (same shape as JSONL records).
  */
 function rowToMemoryRecord(row: L1RecordRow): MemoryRecord {
-  let metadata: EpisodicMetadata | Record<string, never> = {};
+  let metadata: Record<string, unknown> = {};
   try {
-    metadata = JSON.parse(row.metadata_json) as EpisodicMetadata | Record<string, never>;
+    metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
   } catch {
     // malformed JSON — use empty object
   }
@@ -77,7 +77,7 @@ function rowToMemoryRecord(row: L1RecordRow): MemoryRecord {
     type: row.type as MemoryType,
     priority: row.priority,
     scene_name: row.scene_name,
-    source_message_ids: [], // not stored in SQLite (vector search doesn't need them)
+    source_message_ids: Array.isArray(metadata.source_message_ids) ? metadata.source_message_ids as string[] : [],
     metadata,
     timestamps,
     createdAt: row.created_time,

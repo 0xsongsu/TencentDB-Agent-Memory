@@ -110,7 +110,7 @@ export class PersonaGenerator {
     // 2. Load scene index + identify changed scenes
     const index = await readSceneIndex(this.dataDir, this.storage);
     const changedScenes = index.filter((e) => {
-      if (!cp.last_persona_time) return true;
+      if (!existingPersona || cp.request_persona_update || !cp.last_persona_time) return true;
       const updatedMs = new Date(e.updated).getTime();
       const personaMs = new Date(cp.last_persona_time).getTime();
       // If either date is unparseable (NaN), treat as changed (conservative)
@@ -298,7 +298,7 @@ export class PersonaGenerator {
 
     const cpManager = new CheckpointManager(this.dataDir, this.logger, this.storage);
     const cp = await cpManager.read();
-    await cpManager.markPersonaGenerated(cp.total_processed);
+    await cpManager.markPersonaGenerated(cp.total_processed, cp.memories_since_last_persona);
     return true;
   }
 }

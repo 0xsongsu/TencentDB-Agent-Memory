@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * L1 Memory Extractor: extracts structured memories from L0 conversation messages
  * using a single LLM call with JSON-mode structured output.
@@ -15,7 +16,7 @@
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
-import { writeMemory, generateMemoryId } from "./l1-writer.js";
+import { writeMemory } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
 import { sanitizeJsonForParse, shouldExtractL1 } from "../../utils/sanitize.js";
@@ -228,12 +229,37 @@ export async function extractL1Memories(params: {
         logger?.warn?.(`${TAG} Skipping memory with invalid type "${mem.type}"`);
         continue;
       }
+      const sources = mem.source_message_ids.map((id) => newMessages.find((message) => message.id === id));
+      if (sources.length === 0 || sources.some((source) => !source)) {
+        throw new Error(`L1 returned invalid new-message provenance: ${JSON.stringify(mem.source_message_ids)}`);
+      }
+      if ((options.promptMode ?? "chat") === "chat") {
+        const evidence = mem.metadata.evidence;
+        const grounded = Array.isArray(evidence) && evidence.length > 0 && evidence.every((item) =>
+          item && typeof item.message_id === "string" && typeof item.quote === "string" && item.quote.trim() &&
+          sources.some((source) => source !== undefined && source.id === item.message_id && source.content.includes(item.quote)),
+        );
+        const userGrounded = grounded && (evidence as Array<{ message_id: string }>).every((item) =>
+          sources.some((source) => source?.id === item.message_id && source.role === "user"),
+        );
+        if (!grounded) throw new Error("L1 returned evidence that does not match its source message");
+        mem.metadata.evidence = (evidence as Array<{ message_id: string; quote: string }>).map((item) => ({
+          ...item, source_timestamp: new Date(sources.find((source) => source?.id === item.message_id)!.timestamp).toISOString(),
+        }));
+        if (mem.priority < 70 || !userGrounded ||
+          (memType === "episodic" && mem.metadata.scope !== "task") ||
+          ((memType === "persona" || memType === "instruction") && (!userGrounded || mem.metadata.scope !== "user")) ||
+          (memType === "instruction" && mem.metadata.explicit_long_term !== true)) {
+          logger?.warn?.(`${TAG} Skipping memory that failed evidence, scope or value validation`);
+          continue;
+        }
+      }
       allExtracted.push({
         content: mem.content,
         type: memType,
         priority: typeof mem.priority === "number" ? mem.priority : 50,
         source_message_ids: Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [],
-        metadata: mem.metadata ?? {},
+        metadata: { ...mem.metadata, source_message_ids: mem.source_message_ids, source: "conversation", evidence_version: 1 },
         scene_name: scene.scene_name,
       });
     }
@@ -290,7 +316,7 @@ export async function extractL1Memories(params: {
   // Assign temporary IDs to extracted memories (needed for batch dedup)
   const memoriesWithIds = extracted.map((m) => ({
     ...m,
-    record_id: generateMemoryId(),
+    record_id: `m_${createHash("sha256").update(JSON.stringify([teamId, userId, agentId, taskId, sessionKey, m.source_message_ids, m.type, m.content])).digest("hex").slice(0, 32)}`,
   }));
 
   // Step 2: Batch Conflict Detection + Write
@@ -320,7 +346,7 @@ export async function extractL1Memories(params: {
         embeddingTimeoutMs: options.embeddingTimeoutMs,
         llmRunner: options.llmRunner,
         traceContext: { teamId, userId, agentId, sessionId },
-        ...(teamId || userId || agentId || sessionId || taskId ? { filter: { teamId, userId, agentId, sessionId, taskId } } : {}),
+        ...(teamId || userId || agentId || sessionId || taskId ? { filter: { teamId, userId, agentId, sessionId: options.promptMode === "code" ? sessionId : undefined, taskId } } : {}),
       });
       dedupLatencyMs = Date.now() - dedupStartMs;
 
@@ -359,8 +385,8 @@ export async function extractL1Memories(params: {
       });
 
     } catch (err) {
-      logger?.warn?.(`${TAG} Batch dedup failed, storing all as new: ${err instanceof Error ? err.message : String(err)}`);
-      storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+      logger?.warn?.(`${TAG} Batch dedup failed; retry required: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
     }
   } else {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
@@ -492,9 +518,10 @@ async function callLlmExtraction(params: {
   const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", memoryPrompt, llmRunner, traceContext } = params;
 
   const systemPrompt = composeMemorySystemPrompt(getExtractMemoriesSystemPrompt(promptMode), memoryPrompt);
+  const sourceAliases = new Map(newMessages.map((message, index) => [`new_${index + 1}`, message.id]));
   const userPrompt = formatExtractionPrompt({
-    newMessages,
-    backgroundMessages,
+    newMessages: promptMode === "chat" ? newMessages.map((message, index) => ({...message, id: `new_${index + 1}`})).filter((message) => message.role === "user") : newMessages,
+    backgroundMessages: promptMode === "chat" ? [...backgroundMessages, ...newMessages.filter((message) => message.role === "assistant")].map((message, index) => ({...message, id: `background_${index + 1}`})) : backgroundMessages,
     previousSceneName,
   });
 
@@ -536,7 +563,19 @@ async function callLlmExtraction(params: {
     });
   }
 
-  return parseExtractionResult(result, logger);
+  const outcome = parseExtractionResult(result, logger);
+  if (promptMode === "chat") {
+    for (const scene of outcome.scenes) {
+      scene.message_ids = scene.message_ids.map((id) => sourceAliases.get(id) ?? id);
+      for (const memory of scene.memories) {
+        memory.source_message_ids = memory.source_message_ids.map((id) => sourceAliases.get(id) ?? id);
+        if (Array.isArray(memory.metadata.evidence)) {
+          memory.metadata.evidence = memory.metadata.evidence.map((item) => item && typeof item === "object" ? {...item, message_id: sourceAliases.get(item.message_id) ?? item.message_id} : item);
+        }
+      }
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -639,12 +678,14 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
     for (const item of parsed) {
       if (!item || typeof item !== "object") continue;
       const s = item as Record<string, unknown>;
+      const memories = typeof s.content === "string" ? [s] : s.memories;
+      if (!Array.isArray(memories)) throw new Error("L1 response item has no memory array or fact content");
 
       scenes.push({
         scene_name: typeof s.scene_name === "string" ? s.scene_name : "未知情境",
-        message_ids: Array.isArray(s.message_ids) ? s.message_ids.map(String) : [],
-        memories: Array.isArray(s.memories)
-          ? (s.memories as Array<Record<string, unknown>>)
+        message_ids: Array.isArray(s.message_ids) ? s.message_ids.map(String) : Array.isArray(s.source_message_ids) ? s.source_message_ids.map(String) : [],
+        memories: Array.isArray(memories)
+          ? (memories as Array<Record<string, unknown>>)
               .filter((m) => m && typeof m === "object" && typeof m.content === "string" && (m.content as string).length > 0)
               .map((m) => ({
                 content: String(m.content),
@@ -742,6 +783,7 @@ async function applyDecisions(params: {
       logger?.warn?.(
         `${TAG} Write failed for memory "${memoryWithId.content.slice(0, 50)}...": ${err instanceof Error ? err.message : String(err)}`,
       );
+      throw err;
     }
   }
 
@@ -795,6 +837,7 @@ async function storeAllDirectly(
       logger?.warn?.(
         `${TAG} Write failed for memory "${memoryWithId.content.slice(0, 50)}...": ${err instanceof Error ? err.message : String(err)}`,
       );
+      throw err;
     }
   }
 

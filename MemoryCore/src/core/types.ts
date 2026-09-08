@@ -102,6 +102,8 @@ export interface LLMRunParams {
   storage?: import("./storage/adapter.js").StorageAdapter;
   /** Key prefix for storage-backed tools (sandbox boundary). Default: "" */
   storagePrefix?: string;
+  /** Restrict generated file mutations to this filename prefix (reads stay available). */
+  writeFilenamePrefix?: string;
   /** Plugin instance ID for metric reporting (optional). */
   instanceId?: string;
   /**

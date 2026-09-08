@@ -89,7 +89,11 @@ export function generateSceneNavigation(entries: SceneIndexEntry[], dataDir?: st
           ? path.join(dataDir, "scene_blocks", e.filename)
           : `scene_blocks/${e.filename}`,
     readTool: useCos ? "tdai_read_file" : "read",
-    footer: useCos ? storageNavFooter("tdai_read_file") : NAV_FOOTER_LOCAL,
+    footer: useCos
+      ? storageNavFooter("tdai_read_file")
+      : dataDir
+        ? NAV_FOOTER_LOCAL
+        : "Path 是当前作用域中的相对场景路径。宿主通过场景读取 API /scenario/read 按文件名读取；不要把它当作本机绝对路径。",
   });
 }
 

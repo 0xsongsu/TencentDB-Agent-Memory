@@ -186,16 +186,38 @@ async function runLlmJudgment(
     }
 
     const decisions = parseBatchResult(result, memories, logger);
+    for (const decision of decisions) {
+      const match = matches.find((entry) => entry.newMemory.record_id === decision.record_id)!;
+      const allowed = new Set(match.candidates.map((candidate) => candidate.id));
+      if (decision.target_ids.some((id) => !allowed.has(id)) ||
+          ((decision.action === "merge" || decision.action === "update") && decision.target_ids.length === 0)) {
+        throw new Error(`Conflict decision targets outside recalled scope: ${decision.record_id}`);
+      }
+      // Dedup may reconcile wording, but cannot promote a task into a permanent rule.
+      if (promptMode === "chat") {
+        decision.merged_type = match.newMemory.type;
+        const targets = match.candidates.filter((candidate) => decision.target_ids.includes(candidate.id));
+        if (decision.action === "merge") {
+          if (targets.some((candidate) => candidate.metadata.evidence_version !== 1 || candidate.metadata.scope !== match.newMemory.metadata.scope)) {
+            // Unverified legacy text cannot acquire the new fact's verified status.
+            decision.action = "store";
+            decision.target_ids = [];
+            decision.merged_content = undefined;
+          } else {
+            const source = memories.find((memory) => memory.record_id === decision.record_id)!;
+            source.metadata.evidence = [...(source.metadata.evidence as unknown[] ?? []), ...targets.flatMap((candidate) => candidate.metadata.evidence as unknown[] ?? [])];
+            source.source_message_ids = [...new Set([...source.source_message_ids, ...targets.flatMap((candidate) => candidate.metadata.source_message_ids as string[] ?? [])])];
+            source.metadata.source_message_ids = source.source_message_ids;
+          }
+        } else if (decision.action === "update") {
+          decision.merged_content = match.newMemory.content;
+        }
+      }
+    }
     return decisions;
   } catch (err) {
-    logger?.warn?.(
-      `${TAG} Batch conflict detection failed, defaulting all to store: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return memories.map((m) => ({
-      record_id: m.record_id,
-      action: "store" as const,
-      target_ids: [],
-    }));
+    logger?.warn?.(`${TAG} Batch conflict detection failed; retry required: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
   }
 }
 
@@ -348,7 +370,7 @@ function parseBatchResult(
     const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
       logger?.warn?.(`${TAG} No JSON array found in conflict detection response`);
-      return fallbackStoreAll(memories);
+      throw new Error("Invalid conflict detection response");
     }
 
     // Sanitize control characters inside JSON string literals that LLM may produce
@@ -357,7 +379,7 @@ function parseBatchResult(
 
     if (!Array.isArray(parsed)) {
       logger?.warn?.(`${TAG} Conflict detection response is not an array`);
-      return fallbackStoreAll(memories);
+      throw new Error("Invalid conflict detection response");
     }
 
     // Build decisions from LLM output
@@ -374,10 +396,10 @@ function parseBatchResult(
         logger?.debug?.(`${TAG} Skipping decision with empty record_id`);
         continue;
       }
-      const action = String(d.action ?? "store");
+      const action = String(d.action ?? "");
 
       if (!validActions.includes(action)) {
-        logger?.warn?.(`${TAG} Invalid action "${action}" for record ${recordId}, defaulting to store`);
+        throw new Error(`Invalid conflict action for ${recordId}`);
       }
 
       decisions.push({
@@ -391,33 +413,14 @@ function parseBatchResult(
       });
     }
 
-    // Ensure all memories have a decision (fill missing with "store")
-    const decidedIds = new Set(decisions.map((d) => d.record_id));
-    for (const mem of memories) {
-      if (!decidedIds.has(mem.record_id)) {
-        logger?.debug?.(`${TAG} No decision for record ${mem.record_id}, defaulting to store`);
-        decisions.push({
-          record_id: mem.record_id,
-          action: "store",
-          target_ids: [],
-        });
-      }
+    const decidedIds = new Set(decisions.map((decision) => decision.record_id));
+    if (decidedIds.size !== memories.length || decisions.length !== memories.length || memories.some((memory) => !decidedIds.has(memory.record_id))) {
+      throw new Error("Missing or duplicate conflict decision");
     }
 
     return decisions;
   } catch (err) {
     logger?.warn?.(`${TAG} Failed to parse conflict detection result: ${err instanceof Error ? err.message : String(err)}`);
-    return fallbackStoreAll(memories);
+    throw new Error("Invalid conflict detection response");
   }
-}
-
-/**
- * Fallback: store all memories when parsing fails.
- */
-function fallbackStoreAll(memories: Array<ExtractedMemory & { record_id: string }>): DedupDecision[] {
-  return memories.map((m) => ({
-    record_id: m.record_id,
-    action: "store" as const,
-    target_ids: [],
-  }));
 }

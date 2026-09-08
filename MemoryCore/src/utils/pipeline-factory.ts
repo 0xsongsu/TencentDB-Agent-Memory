@@ -534,7 +534,7 @@ export function createL1Runner(opts: {
       let maxRecordedAtMs = 0;
       for (const m of processed) {
         if (m.recordedAtMs > maxRecordedAtMs) maxRecordedAtMs = m.recordedAtMs;
-        const groupKey = `${m.userId}\u0000${m.agentId}\u0000${m.sessionId}`;
+        const groupKey = `${m.teamId ?? ""}\u0000${m.userId}\u0000${m.agentId}\u0000${m.taskId ?? ""}\u0000${m.sessionId}`;
         let g = groupMap.get(groupKey);
         if (!g) {
           g = { sessionId: m.sessionId, teamId: m.teamId, taskId: m.taskId, userId: m.userId, agentId: m.agentId, messages: [] };
@@ -564,18 +564,9 @@ export function createL1Runner(opts: {
       //     that is not also flagged as full backlog → small tail; defer to
       //     the standard l1Idle timer.
       //
-      // EDGE CASE: if queriedCount === L1_BATCH_QUERY and ALL 2N rows share a
-      // single recordedAtMs, boundary alignment cannot detect siblings beyond
-      // the LIMIT and `sliceEnd` will end up at queriedCount (everything
-      // processed, no unprocessed rows). The cursor advances to that ms; the
-      // next round's `> cursor` filter would skip any further same-ms siblings
-      // existing past the LIMIT. This is unreachable under realistic capture
-      // patterns (agent_end writes ≤ ~10 rows per `now`; seed assigns a fresh
-      // `now` per round). If hit, see TODO below for cursor-tiebreaker fix.
-      // TODO(known-issue): switch to (recorded_at, record_id) composite cursor
-      //   to defend against ≥2N rows sharing one recorded_at_ms.
+      // SQLite completes the boundary millisecond beyond the nominal page limit.
       const hasUnprocessedInBatch = queriedCount > sliceEnd;
-      const hasFullBacklog = queriedCount === L1_BATCH_QUERY && hasUnprocessedInBatch;
+      const hasFullBacklog = queriedCount >= L1_BATCH_QUERY && hasUnprocessedInBatch;
       const hasMore = hasUnprocessedInBatch && !hasFullBacklog;
 
       const totalMessages = processed.length;
@@ -587,6 +578,7 @@ export function createL1Runner(opts: {
 
       let totalExtracted = 0;
       let totalStored = 0;
+      let rootSummaryStored = 0;
       let lastSceneName: string | undefined;
       const profileScopes = new Set<string>();
       const l1PromptTargets = groups.map((group) => ({
@@ -601,6 +593,18 @@ export function createL1Runner(opts: {
           `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
         );
 
+        const groupCheckpoint = new CheckpointManager(
+          scopedDataDir(pluginDataDir, group), logger, scopedStorage(storage, group), checkpointLock,
+        );
+        const groupStateKey = JSON.stringify([sessionKey, group.sessionId, group.taskId ?? ""]);
+        const groupCursor = Math.max(...processed.filter((message) => group.messages.some((source) => source.id === message.id)).map((message) => message.recordedAtMs));
+        const groupState = groupCheckpoint.getRunnerState(await groupCheckpoint.read(), groupStateKey);
+        const profileKey = buildProfileL2Key(group);
+        if (groupState.last_l1_cursor >= groupCursor) {
+          profileScopes.add(profileKey); // Resume the cascade after a partial batch failure.
+          continue;
+        }
+
         const l1Result = await extractL1Memories({
           messages: group.messages,
           sessionKey,
@@ -612,6 +616,7 @@ export function createL1Runner(opts: {
           baseDir: pluginDataDir,
           config,
           options: {
+            maxMessagesPerExtraction: group.messages.length,
             enableDedup: cfg.extraction.enableDedup,
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
             model: cfg.extraction.model,
@@ -633,8 +638,11 @@ export function createL1Runner(opts: {
           storage,
         });
 
+        if (!l1Result.success) throw new Error(`L1 extraction failed for session ${group.sessionId}`);
+        await groupCheckpoint.markL1ExtractionComplete(groupStateKey, l1Result.storedCount, groupCursor, l1Result.lastSceneName);
         totalExtracted += l1Result.extractedCount;
         totalStored += l1Result.storedCount;
+        if (scopedDataDir(pluginDataDir, group) !== pluginDataDir) rootSummaryStored += l1Result.storedCount;
         if (l1Result.storedCount > 0) {
           // L2/L3 output is team+agent scoped, but each L2 extraction input must
           // stay bounded to the source session that just produced L1. Encode the
@@ -655,7 +663,7 @@ export function createL1Runner(opts: {
       // Use maxRecordedAtMs (write time) of the **processed** slice as cursor —
       // always positive, TCVDB-safe. Boundary alignment guarantees we will not
       // skip same-ms siblings on the next round.
-      await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName);
+      await checkpoint.markL1ExtractionComplete(sessionKey, rootSummaryStored, maxRecordedAtMs || undefined, lastSceneName);
       logger.info(
         `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
       );
@@ -731,7 +739,7 @@ export function createL2Runner(opts: {
       return;
     }
 
-    let records: Array<{ content: string; created_at: string; id: string; updatedAt: string; teamId?: string; userId?: string; agentId?: string; sessionId?: string; taskId?: string }>;
+    let records: Array<{ metadata: Record<string, unknown>; type: string; source_message_ids: string[]; scene_name: string; content: string; created_at: string; id: string; updatedAt: string; teamId?: string; userId?: string; agentId?: string; sessionId?: string; taskId?: string }>;
 
     if (vectorStore && !vectorStore.isDegraded()) {
       const { queryMemoryRecords } = await import("../core/record/l1-reader.js");
@@ -758,6 +766,10 @@ export function createL2Runner(opts: {
       );
 
       records = memRecords.map((r) => ({
+        scene_name: r.scene_name,
+        metadata: r.metadata,
+        type: r.type,
+        source_message_ids: r.source_message_ids,
         content: r.content,
         created_at: r.createdAt,
         id: r.id,
@@ -772,6 +784,11 @@ export function createL2Runner(opts: {
       throw new Error(`${TAG} [L2] VectorStore unavailable — cannot read L1 memories for scene extraction (session=${sessionKey})`);
     }
 
+    if ((cfg.persona.promptMode ?? "chat") === "chat") {
+      // Legacy prose is still searchable as history, but cannot bootstrap a verified profile.
+      records = records.filter((record) => record.metadata.evidence_version === 1 || record.metadata.source === "manual" || record.metadata.source === "user_edit");
+    }
+
     if (records.length === 0) {
       logger.debug?.(`${TAG} [L2] No new L1 records found (session=${sessionKey}), skipping scene extraction`);
       return;
@@ -779,7 +796,10 @@ export function createL2Runner(opts: {
 
     const grouped = new Map<string, typeof records>();
     for (const record of records) {
-      const key = buildIsolationScope(record);
+      // Personal facts and task state have different retention goals; do not let
+      // a preference-heavy batch cause the model to discard a valid task update.
+      const key = buildIsolationScope(record) + ((cfg.persona.promptMode ?? "chat") === "chat"
+        ? `|${record.metadata.scope === "task" || record.metadata.source === "activity" ? "task" : "user"}` : "");
       const list = grouped.get(key) ?? [];
       list.push(record);
       grouped.set(key, list);
@@ -824,6 +844,12 @@ export function createL2Runner(opts: {
       });
 
       const memories = groupRecords.map((r) => ({
+        scene_name: r.scene_name,
+        source_conversation_id: r.sessionId,
+        metadata: r.metadata,
+        type: r.type,
+        source_message_ids: r.source_message_ids,
+        updated_at: r.updatedAt,
         content: r.content,
         created_at: r.created_at,
         id: r.id,

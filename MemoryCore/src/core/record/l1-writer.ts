@@ -66,7 +66,7 @@ export interface MemoryRecord {
   /** Source message IDs that contributed to this memory */
   source_message_ids: string[];
   /** Type-specific metadata (e.g., activity_start_time for episodic) */
-  metadata: EpisodicMetadata | Record<string, never>;
+  metadata: Record<string, unknown>;
   /** Timestamp trail: all timestamps related to this memory (for merge history tracking) */
   timestamps: string[];
   /** Creation timestamp (ISO) */
@@ -106,7 +106,7 @@ export interface ExtractedMemory {
   type: MemoryType;
   priority: number;
   source_message_ids: string[];
-  metadata: EpisodicMetadata | Record<string, never>;
+  metadata: Record<string, unknown>;
   /** Scene name this memory was extracted in */
   scene_name: string;
 }
@@ -272,42 +272,8 @@ export async function writeMemory(params: {
     }
   };
 
-  if ((decision.action === "update" || decision.action === "merge") && decision.target_ids.length > 0) {
-    // Remove target records from VectorStore (real-time deletion for retrieval accuracy).
-    // JSONL is append-only — old records remain in files and are cleaned up periodically
-    // by memory-cleaner (which reconciles against VectorStore as source of truth).
-    if (vectorStore) {
-      try {
-        const deleteFilter = teamId || userId || agentId || sessionId
-          ? { teamId, userId, agentId, sessionId: sessionId || undefined, sessionKey }
-          : undefined;
-        if (deleteFilter) {
-          await vectorStore.deleteL1Batch(decision.target_ids, deleteFilter);
-        } else {
-          await vectorStore.deleteL1Batch(decision.target_ids);
-        }
-        logger?.debug?.(`${TAG} VectorStore: deleted ${decision.target_ids.length} target record(s) for ${decision.action}`);
-      } catch (err) {
-        logger?.warn?.(
-          `${TAG} VectorStore delete failed for ${decision.action}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-    try {
-      await appendRecord(JSON.stringify(record) + "\n");
-    } catch (err) {
-      logger?.warn?.(`${TAG} JSONL append failed (non-fatal, VDB write continues): ${err instanceof Error ? err.message : String(err)}`);
-    }
-    logger?.debug?.(`${TAG} ${decision.action} memory: removed [${decision.target_ids.join(",")}] from VectorStore → ${record.id}: ${finalContent.slice(0, 80)}...`);
-  } else {
-    // store: append a new line
-    try {
-      await appendRecord(JSON.stringify(record) + "\n");
-    } catch (err) {
-      logger?.warn?.(`${TAG} JSONL append failed (non-fatal, VDB write continues): ${err instanceof Error ? err.message : String(err)}`);
-    }
-    logger?.debug?.(`${TAG} Stored memory ${record.id}: ${finalContent.slice(0, 80)}...`);
-  }
+  // Persist the replacement before removing any previous version.
+  await appendRecord(JSON.stringify(record) + "\n");
 
   // === Vector Store dual-write ===
   if (vectorStore) {
@@ -337,12 +303,18 @@ export async function writeMemory(params: {
       }
 
       const upsertOk = await vectorStore.upsertL1(record, embedding);
+      if (!upsertOk) throw new Error(`L1 store write failed for ${record.id}`);
+      if ((decision.action === "update" || decision.action === "merge") && decision.target_ids.length) {
+        const targets = decision.target_ids.filter((id) => id !== record.id);
+        if (targets.length && !(await vectorStore.deleteL1Batch(targets, { teamId, userId, agentId, taskId }))) throw new Error(`Failed to retire old L1 versions for ${record.id}`);
+      }
       logger?.debug?.(`${TAG} [vec-dual-write] upsert result=${upsertOk} id=${record.id}`);
     } catch (err) {
-      // Vector write failure should NOT block the main JSONL write
+      // Retain the old record and retry; JSONL already contains the attempted replacement.
       logger?.warn?.(
         `${TAG} [vec-dual-write] FAILED (JSONL already written) id=${record.id}: ${err instanceof Error ? err.message : String(err)}`,
       );
+      throw err;
     }
   } else {
     logger?.debug?.(

@@ -21,6 +21,7 @@ import path from "node:path";
 import { generateText, streamText, tool, stepCountIs, jsonSchema } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { report } from "../../core/report/reporter.js";
+import { stampSceneWrite } from "../../core/scene/scene-format.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -117,7 +118,7 @@ export interface StandaloneLLMConfig {
 
 function resolveSandboxedPath(workspaceDir: string, relativePath: string): string | null {
   const resolved = path.resolve(workspaceDir, relativePath);
-  if (!resolved.startsWith(path.resolve(workspaceDir))) {
+  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep) || path.basename(resolved) === "manual-notes.md") {
     return null;
   }
   return resolved;
@@ -127,7 +128,7 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // Tool definitions (Vercel AI SDK `tool()` format)
 // ============================
 
-function createSandboxedTools(workspaceDir: string, logger?: Logger) {
+function createSandboxedTools(workspaceDir: string, logger?: Logger, writeFilenamePrefix?: string) {
   return {
     read: tool({
       description: "Read the contents of a file at the given relative path.",
@@ -164,11 +165,12 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         required: ["path", "content"],
       }),
       execute: (async (args: { path: string; content: string }) => {
+        if (writeFilenamePrefix && (!args.path.startsWith(writeFilenamePrefix) || /[\\/]/.test(args.path))) return JSON.stringify({ error: `This batch may only write ${writeFilenamePrefix}*.md files.` });
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
           await fsPromises.mkdir(path.dirname(resolved), { recursive: true });
-          await fsPromises.writeFile(resolved, args.content, "utf-8");
+          await fsPromises.writeFile(resolved, stampSceneWrite(args.content), "utf-8");
           logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(args.content, "utf8")} bytes`);
           return JSON.stringify({ success: true });
         } catch (err) {
@@ -201,6 +203,7 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         required: ["path", "edits"],
       }),
       execute: (async (args: { path: string; edits: Array<{ oldText: string; newText: string }> }) => {
+        if (writeFilenamePrefix && (!args.path.startsWith(writeFilenamePrefix) || /[\\/]/.test(args.path))) return JSON.stringify({ error: `This batch may only edit ${writeFilenamePrefix}*.md files.` });
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         if (!args.edits || args.edits.length === 0) return JSON.stringify({ error: "edits array cannot be empty." });
@@ -217,7 +220,7 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
             // of the file on every edit, growing scene blocks exponentially.
             content = content.replace(edit.oldText, () => edit.newText);
           }
-          await fsPromises.writeFile(resolved, content, "utf-8");
+          await fsPromises.writeFile(resolved, stampSceneWrite(content), "utf-8");
           logger?.debug?.(
             `${TAG} edit: "${args.path}" → ${args.edits.length} replacement(s), ${Buffer.byteLength(content, "utf8")} bytes`,
           );
@@ -319,10 +322,10 @@ export class StandaloneLLMRunner implements LLMRunner {
       this.logger?.debug?.(`${TAG} Using caller-provided tools: [${Object.keys(tools!).join(", ")}]`);
     } else if (effectiveEnableTools && params.storage) {
       const { createStorageTools } = await import("./storage-tools.js");
-      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger);
+      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.writeFilenamePrefix);
       this.logger?.debug?.(`${TAG} Using storage-backed tools (prefix="${params.storagePrefix ?? ""}")`);
     } else if (effectiveEnableTools) {
-      tools = createSandboxedTools(workspaceDir, this.logger);
+      tools = createSandboxedTools(workspaceDir, this.logger, params.writeFilenamePrefix);
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }

@@ -18,6 +18,14 @@ export interface SceneBlock {
 const META_START = "-----META-START-----";
 const META_END = "-----META-END-----";
 
+/** File freshness is an observed write time, never a model-supplied claim. */
+export function stampSceneWrite(raw: string): string {
+  if (!raw.startsWith(META_START) || !raw.includes(META_END)) return raw;
+  const block = parseSceneBlock(raw, "");
+  const now = new Date().toISOString();
+  return formatSceneBlock({ ...block.meta, created: block.meta.created || now, updated: now }, block.content);
+}
+
 /**
  * Parse a Scene Block file into structured data.
  */

@@ -716,6 +716,15 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
     }
   }
 
+  // Replayed source ids must not acquire a new recorded_at or trigger L1 again.
+  const existingById = new Map<string, { role: string; content: string; timestamp: number }>();
+  if (store.queryL0Paginated && messages.some((message) => message.id)) {
+    for (let offset = 0; ; offset += 100) {
+      const page = await store.queryL0Paginated({ ...iso, sessionId: session_id, limit: 100, offset });
+      for (const row of page.rows) existingById.set(row.record_id, { role: row.role, content: row.message_text, timestamp: row.timestamp });
+      if (offset + page.rows.length >= page.total) break;
+    }
+  }
   const embedding = deps.getEmbedding();
   const acceptedIds: string[] = [];
   const acceptedRecords: L0Record[] = [];
@@ -726,6 +735,12 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
     // a 12-hex (48-bit) id collides ~18 times by the birthday bound, and an
     // upsert-based write would silently overwrite the colliding message.
     const id = msg.id || `msg-${randomUUID().replace(/-/g, "")}`;
+    const existing = existingById.get(id);
+    if (existing && existing.role === msg.role && existing.content === msg.content &&
+      (!msg.timestamp || existing.timestamp === new Date(msg.timestamp).getTime())) {
+      acceptedIds.push(id);
+      continue;
+    }
     const ingestRecordedAtMs = ingestBaseMs + index;
     const recordedAtMs = msg.recorded_at
       ? new Date(msg.recorded_at).getTime()
@@ -771,7 +786,7 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
   // Each role=user message counts as one conversation round for threshold/timer logic.
   // teamId/agentId 透传给 captureAtomic 决定 hash slot 与锁粒度。
   if (notify_pipeline && deps.notifyPipeline) {
-    const rounds = messages.filter((m) => m.role === "user").length;
+    const rounds = acceptedRecords.filter((m) => m.role === "user").length;
     if (rounds > 0) {
       try {
         await deps.notifyPipeline(auth.serviceId, session_id, rounds, iso?.teamId, iso?.agentId);
@@ -2170,7 +2185,10 @@ async function handleCoreRead(_body: unknown, _auth: V2AuthContext, requestId: s
   const storage = scopedProfileStorage(baseStorage, deps.requestIsolation);
 
   deps.logger.debug?.(`${TAG} [core/read] storage.type=${storage.type}, key="${StoragePaths.persona}"`);
-  const content = await storage.readFile(StoragePaths.persona);
+  const manual = (_body as { manual?: boolean } | null)?.manual === true;
+  const manualContent = await storage.readFile("manual-notes.md");
+  const generatedContent = manual ? null : await storage.readFile(StoragePaths.persona);
+  const content = manual ? manualContent : [manualContent, generatedContent].filter(Boolean).join("\n\n") || null;
   deps.logger.debug?.(`${TAG} [core/read] readFile result: ${content === null ? "null (not found)" : `${content.length} chars`}`);
 
   // File not found → return 200 with null content (not 404)
@@ -2182,12 +2200,14 @@ async function handleCoreRead(_body: unknown, _auth: V2AuthContext, requestId: s
     }, requestId);
   }
 
-  const stat = await storage.stat(StoragePaths.persona);
+  const manualStat = await storage.stat("manual-notes.md");
+  const generatedStat = manual ? null : await storage.stat(StoragePaths.persona);
+  const stat = !generatedStat || (manualStat && manualStat.lastModified > generatedStat.lastModified) ? manualStat : generatedStat;
   const now = new Date().toISOString();
 
   return successEnvelope<CoreFile>({
     content,
-    version: await getProfileVersion(deps.getStore(), "l3", StoragePaths.persona, deps.requestIsolation),
+    version: manual && stat ? Math.floor(new Date(stat.lastModified).getTime()) : await getProfileVersion(deps.getStore(), "l3", StoragePaths.persona, deps.requestIsolation),
     team_id: deps.requestIsolation?.teamId,
     agent_id: deps.requestIsolation?.agentId,
     created_at: stat ? new Date(stat.createdAt).toISOString() : now,
@@ -2213,7 +2233,8 @@ async function handleCoreCount(body: unknown, _auth: V2AuthContext, requestId: s
   if (!baseStorage) return errorEnvelope(503, "Storage not available", requestId);
   const storage = scopedProfileStorage(baseStorage, deps.requestIsolation);
   const content = await storage.readFile(StoragePaths.persona);
-  return successEnvelope<CountData>({ total: content ? 1 : 0 }, requestId);
+  const manualContent = await storage.readFile("manual-notes.md");
+  return successEnvelope<CountData>({ total: content || manualContent ? 1 : 0 }, requestId);
 }
 
 async function handleCoreWrite(body: unknown, _auth: V2AuthContext, requestId: string, deps: V2RouterDeps): Promise<ApiResponseEnvelope> {
@@ -2224,6 +2245,15 @@ async function handleCoreWrite(body: unknown, _auth: V2AuthContext, requestId: s
   const baseStorage = deps.getStorage();
   if (!baseStorage) return errorEnvelope(503, "Storage not available", requestId);
   const storage = scopedProfileStorage(baseStorage, deps.requestIsolation);
+
+  if ((body as { manual?: unknown }).manual !== undefined && typeof (body as { manual?: unknown }).manual !== "boolean") {
+    return errorEnvelope(400, "manual must be boolean", requestId);
+  }
+  if ((body as { manual?: boolean }).manual === true) {
+    // Separate authoritative user notes from the LLM-owned persona file.
+    await storage.writeFile("manual-notes.md", content);
+    return successEnvelope<CoreWriteData>({ version: Date.now(), updated_at: new Date().toISOString() }, requestId);
+  }
 
   // Normalize before persistence: persona body must NOT contain Scene Navigation
   // (a derived section rebuilt from scene_index.json) or stray surrounding
