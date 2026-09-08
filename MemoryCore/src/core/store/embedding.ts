@@ -66,6 +66,12 @@ export interface EmbeddingProviderInfo {
 export interface EmbeddingCallOptions {
   /** Override the default timeout for this call (milliseconds). */
   timeoutMs?: number;
+  /**
+   * An interactive call (a recall query answering a live request) is sent with
+   * `X-Embedding-Priority: interactive` so a provider that queues requests can
+   * serve it ahead of background work (backfill, imports).
+   */
+  priority?: "interactive" | "background";
 }
 
 export interface EmbeddingService {
@@ -489,7 +495,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
   }
 
   embed(text: string, options?: EmbeddingCallOptions): Promise<Float32Array> {
-    const key = `${options?.timeoutMs ?? this.timeoutMs}\u0000${text}`;
+    const key = `${options?.timeoutMs ?? this.timeoutMs}\u0000${options?.priority ?? ""}\u0000${text}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
     const pending = this.embedBatch([text], options).then(([result]) => result);
@@ -512,13 +518,13 @@ export class OpenAIEmbeddingService implements EmbeddingService {
       const results: Float32Array[] = [];
       for (let i = 0; i < processedTexts.length; i += MAX_BATCH_SIZE) {
         const chunk = processedTexts.slice(i, i + MAX_BATCH_SIZE);
-        const chunkResults = await this._callApi(chunk, options?.timeoutMs);
+        const chunkResults = await this._callApi(chunk, options?.timeoutMs, options?.priority);
         results.push(...chunkResults);
       }
       return results;
     }
 
-    return this._callApi(processedTexts, options?.timeoutMs);
+    return this._callApi(processedTexts, options?.timeoutMs, options?.priority);
   }
 
   /**
@@ -533,7 +539,11 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     return text.slice(0, this.maxInputChars);
   }
 
-  private async _callApi(texts: string[], timeoutOverride?: number): Promise<Float32Array[]> {
+  private async _callApi(
+    texts: string[],
+    timeoutOverride?: number,
+    priority?: EmbeddingCallOptions["priority"],
+  ): Promise<Float32Array[]> {
     const body: Record<string, unknown> = {
       input: texts,
       model: this.model,
@@ -549,6 +559,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
       "Content-Type": "application/json",
       Authorization: `Bearer ${this.apiKey}`,
     };
+    if (priority) headers["X-Embedding-Priority"] = priority;
     if (useProxy) {
       headers["Remote-URL"] = `${this.baseUrl}/embeddings`;
       this.logger?.debug?.(

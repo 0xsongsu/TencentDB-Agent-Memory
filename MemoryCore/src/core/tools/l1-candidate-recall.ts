@@ -236,8 +236,8 @@ async function recallVector(
     if (!vec) {
       logger?.debug?.(`${tag} [hybrid-vec] Generating query embedding...`);
       vec = embeddingTimeoutMs != null
-        ? await embeddingService!.embed(embeddingQuery, { timeoutMs: embeddingTimeoutMs })
-        : await embeddingService!.embed(embeddingQuery);
+        ? await embeddingService!.embed(embeddingQuery, { timeoutMs: embeddingTimeoutMs, priority: "interactive" })
+        : await embeddingService!.embed(embeddingQuery, { priority: "interactive" });
     }
     if (!vec || vec.length === 0) {
       logger?.debug?.(`${tag} [hybrid-vec] Empty query embedding, skipping vector path`);

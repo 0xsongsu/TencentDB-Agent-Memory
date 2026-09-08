@@ -204,7 +204,7 @@ export async function executeConversationSearch(params: {
   }
 
   const queryEmbedding = hasEmbedding
-    ? embeddingService!.embed(embeddingSearchQuery(embeddingService!, query))
+    ? embeddingService!.embed(embeddingSearchQuery(embeddingService!, query), { priority: "interactive" })
     : undefined;
 
   // ── SQLite dual-path: run FTS5 + Vector in parallel, merge explicit slots ──
