@@ -718,12 +718,10 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
 
   // Replayed source ids must not acquire a new recorded_at or trigger L1 again.
   const existingById = new Map<string, { role: string; content: string; timestamp: number }>();
-  if (store.queryL0Paginated && messages.some((message) => message.id)) {
-    for (let offset = 0; ; offset += 100) {
-      const page = await store.queryL0Paginated({ ...iso, sessionId: session_id, limit: 100, offset });
-      for (const row of page.rows) existingById.set(row.record_id, { role: row.role, content: row.message_text, timestamp: row.timestamp });
-      if (offset + page.rows.length >= page.total) break;
-    }
+  const recordIds = messages.flatMap((message) => message.id ? [message.id] : []);
+  if (store.getL0ByIds && recordIds.length > 0) {
+    const rows = await store.getL0ByIds(recordIds, { ...iso, sessionId: session_id });
+    for (const row of rows) existingById.set(row.record_id, { role: row.role, content: row.message_text, timestamp: row.timestamp });
   }
   const embedding = deps.getEmbedding();
   const acceptedIds: string[] = [];

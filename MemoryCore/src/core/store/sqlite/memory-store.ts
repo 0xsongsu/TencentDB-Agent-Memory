@@ -2592,6 +2592,39 @@ export class VectorStore implements IMemoryStore {
 
   // ── v2 API: Paginated queries ─────────────────────────────
 
+  getL0ByIds(recordIds: string[], filter: IsolationFilter = {}): Array<{ record_id: string; role: string; message_text: string; timestamp: number }> {
+    const rows: Array<{ record_id: string; role: string; message_text: string; timestamp: number }> = [];
+    for (let offset = 0; offset < recordIds.length; offset += 500) {
+      const ids = recordIds.slice(offset, offset + 500);
+      const conditions = [`record_id IN (${ids.map(() => "?").join(",")})`];
+      const params: SQLInputValue[] = [...ids];
+      if (filter.sessionId) {
+        conditions.push("(session_key = ? OR session_id = ?)");
+        params.push(filter.sessionId, filter.sessionId);
+      }
+      if (filter.teamId !== undefined) {
+        conditions.push("team_id = ?");
+        params.push(filter.teamId);
+      }
+      if (filter.userId !== undefined) {
+        conditions.push("user_id = ?");
+        params.push(filter.userId);
+      }
+      if (filter.agentId !== undefined) {
+        conditions.push("agent_id = ?");
+        params.push(filter.agentId);
+      }
+      if (filter.taskId !== undefined) {
+        conditions.push("task_id = ?");
+        params.push(filter.taskId);
+      }
+      rows.push(...this.db.prepare(
+        `SELECT record_id, role, message_text, timestamp FROM l0_conversations WHERE ${conditions.join(" AND ")}`,
+      ).all(...params) as unknown as typeof rows);
+    }
+    return rows;
+  }
+
   /**
    * L0 paginated query for v2 `/conversation/query`.
    * Uses SQL WHERE + LIMIT + OFFSET, no full-table scan.

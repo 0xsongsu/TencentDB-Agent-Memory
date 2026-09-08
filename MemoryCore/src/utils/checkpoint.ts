@@ -47,6 +47,7 @@ export interface RunnerSessionState {
   // ═══ L1 — cursor & continuity ═══
   /** L0 JSONL cursor: epoch ms of last message processed by L1 */
   last_l1_cursor: number;
+  l1_consecutive_failures: number;
   /** Last scene name from the most recent L1 extraction (for cross-batch continuity) */
   last_scene_name: string;
 }
@@ -111,6 +112,7 @@ export interface Checkpoint {
 const DEFAULT_RUNNER_STATE: RunnerSessionState = {
   last_captured_timestamp: 0,
   last_l1_cursor: 0,
+  l1_consecutive_failures: 0,
   last_scene_name: "",
 };
 
@@ -305,6 +307,7 @@ export class CheckpointManager {
             ...DEFAULT_RUNNER_STATE,
             last_captured_timestamp: (state.last_captured_timestamp as number) ?? 0,
             last_l1_cursor: (state.last_l1_cursor as number) ?? 0,
+            l1_consecutive_failures: (state.l1_consecutive_failures as number) ?? 0,
             last_scene_name: (state.last_scene_name as string) ?? "",
           };
           cp.pipeline_states[key] = {
@@ -631,6 +634,15 @@ export class CheckpointManager {
   // L1-specific methods
   // ============================
 
+  async markL1ExtractionFailed(stateKey: string): Promise<number> {
+    let failures = 0;
+    await this.mutate((cp) => {
+      const state = this.getRunnerState(cp, stateKey);
+      failures = ++state.l1_consecutive_failures;
+    });
+    return failures;
+  }
+
   /**
    * Mark L1 extraction completed: reset sinceL1 counter, advance L1 cursor,
    * and optionally save the last scene name for cross-batch continuity.
@@ -647,6 +659,7 @@ export class CheckpointManager {
     let regressed = false;
     await this.mutate((cp) => {
       const state = this.getRunnerState(cp, sessionKey);
+      state.l1_consecutive_failures = 0;
       if (cursorRecordedAtMs && cursorRecordedAtMs <= state.last_l1_cursor) {
         regressed = cursorRecordedAtMs < state.last_l1_cursor;
         return; // Replay must not increment persona counters twice.

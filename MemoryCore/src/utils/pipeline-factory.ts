@@ -63,6 +63,8 @@ import {
 import { createScopedStorageAdapter, scopeProfileStorageView, StorageAdapter } from "../core/storage/adapter.js";
 import type { Logger } from "../core/types.js";
 
+const L1_MAX_CONSECUTIVE_FAILURES = 3;
+
 const TAG = "[memory-tdai] [pipeline-factory]";
 
 // ============================
@@ -605,58 +607,68 @@ export function createL1Runner(opts: {
           continue;
         }
 
-        const l1Result = await extractL1Memories({
-          messages: group.messages,
-          sessionKey,
-          sessionId: group.sessionId,
-          taskId: group.taskId,
-          teamId: group.teamId,
-          userId: group.userId,
-          agentId: group.agentId,
-          baseDir: pluginDataDir,
-          config,
-          options: {
-            maxMessagesPerExtraction: group.messages.length,
-            enableDedup: cfg.extraction.enableDedup,
-            maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
-            model: cfg.extraction.model,
-            promptMode: cfg.extraction.promptMode,
-            memoryPrompt: l1Prompts.get(memoryPromptResolveKey({
-              teamId: group.teamId,
-              agentId: group.agentId,
-              layer: "l1",
-            })),
-            previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
-            vectorStore,
-            embeddingService,
-            conflictRecallTopK: cfg.embedding.conflictRecallTopK,
-            embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
-            llmRunner,
-          },
-          logger,
-          instanceId: getInstanceId?.(),
-          storage,
-        });
-
-        if (!l1Result.success) throw new Error(`L1 extraction failed for session ${group.sessionId}`);
-        await groupCheckpoint.markL1ExtractionComplete(groupStateKey, l1Result.storedCount, groupCursor, l1Result.lastSceneName);
-        totalExtracted += l1Result.extractedCount;
-        totalStored += l1Result.storedCount;
-        if (scopedDataDir(pluginDataDir, group) !== pluginDataDir) rootSummaryStored += l1Result.storedCount;
-        if (l1Result.storedCount > 0) {
-          // L2/L3 output is team+agent scoped, but each L2 extraction input must
-          // stay bounded to the source session that just produced L1. Encode the
-          // source session in the L2 task key; buildIsolationScope() will ignore
-          // it later when choosing the profile output directory.
-          profileScopes.add(buildProfileL2Key({
+        try {
+          const l1Result = await extractL1Memories({
+            messages: group.messages,
+            sessionKey,
+            sessionId: group.sessionId,
+            taskId: group.taskId,
             teamId: group.teamId,
             userId: group.userId,
             agentId: group.agentId,
-            sessionId: group.sessionId,
-          }));
-        }
-        if (l1Result.lastSceneName) {
-          lastSceneName = l1Result.lastSceneName;
+            baseDir: pluginDataDir,
+            config,
+            options: {
+              maxMessagesPerExtraction: group.messages.length,
+              enableDedup: cfg.extraction.enableDedup,
+              maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
+              model: cfg.extraction.model,
+              promptMode: cfg.extraction.promptMode,
+              memoryPrompt: l1Prompts.get(memoryPromptResolveKey({
+                teamId: group.teamId,
+                agentId: group.agentId,
+                layer: "l1",
+              })),
+              previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
+              vectorStore,
+              embeddingService,
+              conflictRecallTopK: cfg.embedding.conflictRecallTopK,
+              embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
+              llmRunner,
+            },
+            logger,
+            instanceId: getInstanceId?.(),
+            storage,
+          });
+
+          if (!l1Result.success) throw new Error(`L1 extraction failed for session ${group.sessionId}`);
+          await groupCheckpoint.markL1ExtractionComplete(groupStateKey, l1Result.storedCount, groupCursor, l1Result.lastSceneName);
+          totalExtracted += l1Result.extractedCount;
+          totalStored += l1Result.storedCount;
+          if (scopedDataDir(pluginDataDir, group) !== pluginDataDir) rootSummaryStored += l1Result.storedCount;
+          if (l1Result.storedCount > 0) {
+            // L2/L3 output is team+agent scoped, but each L2 extraction input must
+            // stay bounded to the source session that just produced L1. Encode the
+            // source session in the L2 task key; buildIsolationScope() will ignore
+            // it later when choosing the profile output directory.
+            profileScopes.add(buildProfileL2Key({
+              teamId: group.teamId,
+              userId: group.userId,
+              agentId: group.agentId,
+              sessionId: group.sessionId,
+            }));
+          }
+          if (l1Result.lastSceneName) {
+            lastSceneName = l1Result.lastSceneName;
+          }
+        } catch (error) {
+          const failures = await groupCheckpoint.markL1ExtractionFailed(groupStateKey);
+          if (failures < L1_MAX_CONSECUTIVE_FAILURES) throw error;
+          logger.warn(
+            `${TAG} [l1] Skipping group=${groupStateKey} session=${group.sessionId} after ${failures} failures; ` +
+            `cursor=(${groupState.last_l1_cursor}, ${groupCursor}]; error=${error instanceof Error ? error.message : String(error)}`,
+          );
+          await groupCheckpoint.markL1ExtractionComplete(groupStateKey, 0, groupCursor, undefined);
         }
       }
 

@@ -698,6 +698,8 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
 
   // ── v2 API: Paginated queries (optional — added for Gateway v2) ──
 
+  getL0ByIds?(recordIds: string[], filter?: IsolationFilter): MaybePromise<Array<{ record_id: string; role: string; message_text: string; timestamp: number }>>;
+
   /**
    * L0 paginated query for v2 API `/conversation/query`.
    * Returns rows matching the filter, paginated by limit/offset,
