@@ -50,6 +50,11 @@ const TAG = "[META-V3]";
 export interface V3MetaRouterDeps {
   getMetadataService: (instanceId: string) => MetadataService | undefined | Promise<MetadataService | undefined>;
   logger: Logger;
+  /**
+   * 嵌入式单用户实例（TDAI_EMBEDDED_OWNER_USER_ID）：进程按 profile 私有且已由 Bearer
+   * 网关密钥保护，无 x-tdai-user-key 的请求以该 owner 身份执行。
+   */
+  embeddedOwnerUserId?: string;
 }
 
 type Ctx = V3AuthContext;
@@ -434,6 +439,9 @@ export async function handleV3MetaRoute(
   const headerUserKey = extractUserKeyHeader(req.headers);
   if (V3_NO_USER_KEY_ROUTES.has(pathname)) {
     ctx = { token: "", isAdmin: false, isSystemAdmin: false };
+  } else if (!headerUserKey && deps.embeddedOwnerUserId) {
+    ctx = { token: "", userId: deps.embeddedOwnerUserId, isAdmin: false, isSystemAdmin: false };
+    traceCtx.userId = ctx.userId;
   } else {
     if (!headerUserKey) {
       logMetaApiRejected(traceCtx, {

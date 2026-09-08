@@ -325,6 +325,7 @@ export class TdaiGateway {
   private analyticsChClientInstance: AnalyticsChClient | null | undefined = undefined; // undefined = not yet initialized
   private analyticsChInitPromise: Promise<void> | null = null;
   private memorySystemUserConfig: MemorySystemUserConfig | undefined;
+  private embeddedOwnerUserId: string | undefined;
   private readonly metadataServiceByInstance = new Map<string, MetadataService>();
 
   // ── Skill conversation-add (§21): per-instance handler cache ──
@@ -571,6 +572,7 @@ export class TdaiGateway {
     const embeddedTeamId = process.env.TDAI_EMBEDDED_TEAM_ID?.trim();
     const embeddedAgentId = process.env.TDAI_EMBEDDED_AGENT_ID?.trim();
     if (embeddedOwnerUserId && embeddedTeamId && embeddedAgentId) {
+      this.embeddedOwnerUserId = embeddedOwnerUserId;
       const metadataService = await this.ensureMetadataService(this.config.instanceId);
       if (!(await metadataService.getUserById(embeddedOwnerUserId))) {
         await metadataService.createNormalUser({
@@ -973,6 +975,7 @@ export class TdaiGateway {
         const handledV3 = await handleV3MetaRoute(req, res, pathname, method, parseJsonBody, sendJson, {
           getMetadataService: (instanceId) => this.ensureMetadataService(instanceId),
           logger: this.logger,
+          embeddedOwnerUserId: this.embeddedOwnerUserId,
         });
         if (handledV3) return;
       }
