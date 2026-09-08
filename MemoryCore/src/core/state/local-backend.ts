@@ -15,10 +15,22 @@ import type {
 } from "./types.js";
 import { DEFAULT_PIPELINE_STATE } from "./types.js";
 
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+
 interface InternalTimer {
   member: string;
   fireAtMs: number;
   handle?: ReturnType<typeof setTimeout>;
+}
+
+interface LocalStateSnapshot {
+  version: 1;
+  sessionStates: Array<[string, PipelineSessionState]>;
+  timers: Array<[string, Omit<InternalTimer, "handle">]>;
+  taskQueue: TaskPayload[];
+  pendingTasks: TaskPayload[];
 }
 
 interface QueuedTask {
@@ -34,6 +46,7 @@ interface PendingTask extends QueuedTask {
 interface ConsumeWaiter {
   workerId: string;
   resolve: (task: TaskPayload | null) => void;
+  reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -46,11 +59,55 @@ export class LocalStateBackend implements IStateBackend {
   private nextTaskMessageId = 1;
   private locks = new Map<string, { ownerId: string; expireAt: number }>();
   private consumeWaiters: ConsumeWaiter[] = [];
-  private onTimerExpired?: (entry: TimerEntry) => void;
+  private onTimerExpired?: (entry: TimerEntry) => void | Promise<void>;
+  private checkpointPath?: string;
+  private persistTail = Promise.resolve();
   private destroyed = false;
 
-  constructor(options?: { onTimerExpired?: (entry: TimerEntry) => void }) {
+  constructor(options?: { onTimerExpired?: (entry: TimerEntry) => void | Promise<void>; checkpointPath?: string }) {
     this.onTimerExpired = options?.onTimerExpired;
+    this.checkpointPath = options?.checkpointPath;
+  }
+
+  private snapshot(): LocalStateSnapshot {
+    return {
+      version: 1,
+      sessionStates: [...this.sessionStates],
+      timers: [...this.timers].map(([key, timer]) => [key, { member: timer.member, fireAtMs: timer.fireAtMs }]),
+      taskQueue: this.taskQueue.map(({ task }) => task),
+      pendingTasks: [...this.pendingTasks.values()].map(({ task }) => task),
+    };
+  }
+
+  private persist(): Promise<void> {
+    if (!this.checkpointPath) return Promise.resolve();
+    const checkpointPath = this.checkpointPath;
+    const content = JSON.stringify(this.snapshot());
+    const write = this.persistTail.then(async () => {
+      await mkdir(dirname(checkpointPath), { recursive: true });
+      const tmp = `${checkpointPath}.tmp.${randomBytes(4).toString("hex")}`;
+      await writeFile(tmp, content, "utf-8");
+      await rename(tmp, checkpointPath);
+    });
+    this.persistTail = write;
+    return write;
+  }
+
+  private armTimer(instanceId: string, key: string, member: string, fireAtMs: number): void {
+    const delay = Math.max(0, fireAtMs - Date.now());
+    const handle = this.onTimerExpired
+      ? setTimeout(() => { void this.fireTimer(key, { instanceId, member, fireAtMs }).catch((error) => { console.error("[local-state] Timer settlement failed:", error); }); }, delay)
+      : undefined;
+    if (handle) handle.unref();
+    this.timers.set(key, { member, fireAtMs, handle });
+  }
+
+  private async fireTimer(key: string, entry: TimerEntry): Promise<void> {
+    await this.onTimerExpired?.(entry);
+    const current = this.timers.get(key);
+    if (current?.fireAtMs !== entry.fireAtMs) return;
+    this.timers.delete(key);
+    await this.persist();
   }
 
   /**
@@ -77,6 +134,7 @@ export class LocalStateBackend implements IStateBackend {
     if (!buf || buf.length === 0) return [];
     const drained = buf.splice(0);
     this.buffers.delete(key);
+    await this.persist();
     return drained;
   }
 
@@ -94,12 +152,14 @@ export class LocalStateBackend implements IStateBackend {
     const key = this.k(instanceId, sessionId, teamId, agentId);
     const current = this.sessionStates.get(key) ?? { ...DEFAULT_PIPELINE_STATE, last_active_time: Date.now() };
     this.sessionStates.set(key, { ...current, ...patch });
+    await this.persist();
   }
 
   async deleteSessionState(instanceId: string, sessionId: string, teamId?: string, agentId?: string): Promise<void> {
     const key = this.k(instanceId, sessionId, teamId, agentId);
     this.sessionStates.delete(key);
     this.buffers.delete(key);
+    await this.persist();
   }
 
   async listActiveSessions(instanceId: string): Promise<string[]> {
@@ -122,12 +182,8 @@ export class LocalStateBackend implements IStateBackend {
     const existing = this.timers.get(key);
     if (existing?.handle) clearTimeout(existing.handle);
 
-    const delay = Math.max(0, fireAtMs - Date.now());
-    const handle = this.onTimerExpired
-      ? setTimeout(() => { this.timers.delete(key); this.onTimerExpired!({ instanceId, member, fireAtMs }); }, delay)
-      : undefined;
-    if (handle) handle.unref();
-    this.timers.set(key, { member, fireAtMs, handle });
+    this.armTimer(instanceId, key, member, fireAtMs);
+    await this.persist();
   }
 
   async setTimerIfEarlier(instanceId: string, member: string, fireAtMs: number): Promise<boolean> {
@@ -142,6 +198,7 @@ export class LocalStateBackend implements IStateBackend {
     const existing = this.timers.get(key);
     if (existing?.handle) clearTimeout(existing.handle);
     this.timers.delete(key);
+    await this.persist();
   }
 
   async getExpiredTimers(instanceId: string, nowMs: number): Promise<TimerEntry[]> {
@@ -158,6 +215,7 @@ export class LocalStateBackend implements IStateBackend {
       if (t?.handle) clearTimeout(t.handle);
       this.timers.delete(key);
     }
+    if (expired.length > 0) await this.persist();
     return expired;
   }
 
@@ -165,9 +223,13 @@ export class LocalStateBackend implements IStateBackend {
 
   async enqueueTask(task: TaskPayload): Promise<void> {
     this.enqueueTaskPayload(task);
+    await this.persist();
+    await this.deliverWaitingTask();
   }
 
   private enqueueTaskPayload(task: TaskPayload): void {
+    if (this.taskQueue.some((queued) => queued.task.id === task.id) ||
+        [...this.pendingTasks.values()].some((pending) => pending.task.id === task.id)) return;
     const payload = { ...task };
     delete payload._msgId;
     delete payload._stream;
@@ -183,32 +245,39 @@ export class LocalStateBackend implements IStateBackend {
     if (idx === -1) this.taskQueue.push(queued);
     else this.taskQueue.splice(idx, 0, queued);
 
-    if (this.consumeWaiters.length > 0) {
-      const waiter = this.consumeWaiters.shift()!;
-      clearTimeout(waiter.timer);
-      const next = this.taskQueue.shift();
-      waiter.resolve(next ? this.deliverTask(next, waiter.workerId) : null);
-    }
+  }
+
+  private async deliverWaitingTask(): Promise<void> {
+    if (!this.consumeWaiters.length || !this.taskQueue.length) return;
+    const waiter = this.consumeWaiters.shift()!;
+    clearTimeout(waiter.timer);
+    try { waiter.resolve(await this.consumeTask(waiter.workerId)); }
+    catch (error) { waiter.reject(error); throw error; }
   }
 
   async consumeTask(workerId: string, blockMs?: number): Promise<TaskPayload | null> {
     const next = this.taskQueue.shift();
-    if (next) return this.deliverTask(next, workerId);
+    if (next) {
+      const task = this.deliverTask(next, workerId);
+      await this.persist();
+      return task;
+    }
     if (!blockMs || blockMs <= 0) return null;
 
-    return new Promise<TaskPayload | null>((resolve) => {
+    return new Promise<TaskPayload | null>((resolve, reject) => {
       const timer = setTimeout(() => {
         const idx = this.consumeWaiters.findIndex((w) => w.resolve === resolve);
         if (idx >= 0) this.consumeWaiters.splice(idx, 1);
         resolve(null);
       }, blockMs);
       timer.unref();
-      this.consumeWaiters.push({ workerId, resolve, timer });
+      this.consumeWaiters.push({ workerId, resolve, reject, timer });
     });
   }
 
   async ackTask(taskId: string): Promise<void> {
     this.pendingTasks.delete(taskId);
+    await this.persist();
   }
 
   async refreshTaskClaim(taskId: string, ownerId: string, idleMs: number = 0): Promise<boolean> {
@@ -221,7 +290,9 @@ export class LocalStateBackend implements IStateBackend {
   async ackTaskIfOwned(taskId: string, ownerId: string): Promise<boolean> {
     const pending = this.pendingTasks.get(taskId);
     if (!pending || pending.ownerId !== ownerId) return false;
-    return this.pendingTasks.delete(taskId);
+    this.pendingTasks.delete(taskId);
+    await this.persist();
+    return true;
   }
 
   async replacePendingTask(taskId: string, ownerId: string, replacement: TaskPayload): Promise<boolean> {
@@ -229,6 +300,8 @@ export class LocalStateBackend implements IStateBackend {
     if (!pending || pending.ownerId !== ownerId) return false;
     this.pendingTasks.delete(taskId);
     this.enqueueTaskPayload(replacement);
+    await this.persist();
+    await this.deliverWaitingTask();
     return true;
   }
 
@@ -325,9 +398,10 @@ export class LocalStateBackend implements IStateBackend {
     state.last_active_time = nowMs;
 
     if (state.conversation_count >= threshold) {
-      await this.enqueueTask(taskPayload);
+      this.enqueueTaskPayload(taskPayload);
       state.conversation_count = 0;
       await this.removeTimer(instanceId, timerMember);
+      await this.deliverWaitingTask();
       return { triggered: true, conversationCount: 0 };
     }
 
@@ -374,15 +448,43 @@ export class LocalStateBackend implements IStateBackend {
       if (pending.task.instanceId === instanceId) this.pendingTasks.delete(msgId);
     }
 
+    await this.persist();
     return { sessions, timers, buffers };
   }
 
   // ═══ Lifecycle ═══
 
-  async initialize(): Promise<void> { /* no-op */ }
+  async initialize(): Promise<void> {
+    if (!this.checkpointPath) return;
+    let raw: string;
+    try {
+      raw = await readFile(this.checkpointPath, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const snapshot = JSON.parse(raw) as LocalStateSnapshot;
+    if (snapshot.version !== 1) throw new Error(`Unsupported local state checkpoint version: ${String(snapshot.version)}`);
+
+    this.sessionStates = new Map(snapshot.sessionStates);
+    this.buffers.clear();
+    this.taskQueue = [];
+    this.pendingTasks.clear();
+    for (const task of [...snapshot.taskQueue, ...snapshot.pendingTasks]) this.enqueueTaskPayload(task);
+    for (const [key, timer] of snapshot.timers) {
+      this.timers.set(key, { member: timer.member, fireAtMs: timer.fireAtMs });
+    }
+    await this.persist();
+    console.info(`[local-state] Recovered ${snapshot.taskQueue.length + snapshot.pendingTasks.length} tasks and ${snapshot.timers.length} timers from ${this.checkpointPath}`);
+    for (const [key, timer] of snapshot.timers) {
+      const instanceId = key.slice(0, key.indexOf(":"));
+      this.armTimer(instanceId, key, timer.member, timer.fireAtMs);
+    }
+  }
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    await this.persistTail;
     for (const [, timer] of this.timers) { if (timer.handle) clearTimeout(timer.handle); }
     this.timers.clear();
     for (const w of this.consumeWaiters) { clearTimeout(w.timer); w.resolve(null); }
@@ -400,6 +502,7 @@ export class LocalStateBackend implements IStateBackend {
       buffers: this.buffers.size,
       timers: this.timers.size,
       queue: this.taskQueue.length,
+      pending: this.pendingTasks.size,
       locks: this.locks.size,
     };
   }

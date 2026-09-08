@@ -24,7 +24,8 @@ import { LocalStateBackend } from "./local-backend.js";
 export interface StateBackendConfig {
   type: "local" | "redis";
   local?: {
-    onTimerExpired?: (entry: TimerEntry) => void;
+    onTimerExpired?: (entry: TimerEntry) => void | Promise<void>;
+    checkpointPath?: string;
   };
   redis?: {
     /** backend connection URL */

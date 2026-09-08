@@ -567,6 +567,38 @@ export class TdaiGateway {
     const metadataPool = await this.ensureMetadataStorePool();
     initApiTraceConfig(metadataPool.backend, { enabled: readApiTraceEnabled() });
 
+    const embeddedOwnerUserId = process.env.TDAI_EMBEDDED_OWNER_USER_ID?.trim();
+    const embeddedTeamId = process.env.TDAI_EMBEDDED_TEAM_ID?.trim();
+    const embeddedAgentId = process.env.TDAI_EMBEDDED_AGENT_ID?.trim();
+    if (embeddedOwnerUserId && embeddedTeamId && embeddedAgentId) {
+      const metadataService = await this.ensureMetadataService(this.config.instanceId);
+      if (!(await metadataService.getUserById(embeddedOwnerUserId))) {
+        await metadataService.createNormalUser({
+          user_id: embeddedOwnerUserId,
+          username: "Ghast Desktop",
+        });
+      }
+      if (!(await metadataService.getTeamById(embeddedTeamId))) {
+        await metadataService.createTeam({
+          team_id: embeddedTeamId,
+          name: "Ghast Desktop",
+          owner_user_id: embeddedOwnerUserId,
+        });
+      }
+      if (!(await metadataService.getAgentById(embeddedAgentId))) {
+        await metadataService.createAgent({
+          agent_id: embeddedAgentId,
+          team_id: embeddedTeamId,
+          owner_user_id: embeddedOwnerUserId,
+          name: "Ghast Desktop",
+        });
+      }
+      await metadataService.ensureChatMemoryAsset({
+        team_id: embeddedTeamId,
+        agent_id: embeddedAgentId,
+      });
+    }
+
     // ── 初始化可观测性门面层全局后端 ──
     // 必须在 initOTelSDK 之前调用，因为 LangfuseFilteringProcessor 构造时
     // 会通过 getObservabilityBackend().llmTrace.createSpanProcessor() 获取处理器。
@@ -1726,7 +1758,8 @@ export class TdaiGateway {
     this.stateBackend = await createStateBackend({
       type: backendType,
       local: backendType === "local" ? {
-        onTimerExpired: (entry) => {
+        checkpointPath: join(this.config.data.baseDir, ".metadata", "local-state-backend.json"),
+        onTimerExpired: async (entry) => {
           // Parse timer member by prefix: "offload-{type}:{instanceId}:{sessionId}[:{extra}]"
           // or legacy "session:L2_schedule"
           const member = entry.member;
@@ -1779,7 +1812,7 @@ export class TdaiGateway {
             if (mmdMatch) targetMmdFile = mmdMatch[1];
           }
           const task = {
-            id: `${taskType}-${sessionId}-${now}`,
+            id: `${taskType}-${member}-${entry.fireAtMs}`,
             type: taskType as any,
             instanceId,
             sessionId,
@@ -1789,10 +1822,11 @@ export class TdaiGateway {
             createdAt: now,
             data: { triggeredBy: "timer_scanner", timerMember: member, instanceId, targetMmdFile, teamId, agentId },
           };
-          this.stateBackend!.enqueueTask(task).then(() => {
+          await this.stateBackend!.enqueueTask(task).then(() => {
             this.logger.info(`[local-timer] Timer fired: ${member} → enqueued ${taskType} task`);
           }).catch((err) => {
             this.logger.error(`[local-timer] Failed to enqueue task for ${member}: ${err instanceof Error ? err.message : String(err)}`);
+            throw err;
           });
         },
       } : undefined,
