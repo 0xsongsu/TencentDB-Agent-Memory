@@ -157,6 +157,7 @@ export const teamMemberGetSchema = z.object({ team_id: nonEmpty, user_id: nonEmp
 
 // ── Agent ──
 export const agentCreateSchema = z.object({
+  agent_id: nonEmpty.optional(),
   team_id: nonEmpty,
   owner_user_id: nonEmpty,
   name: nonEmpty,
