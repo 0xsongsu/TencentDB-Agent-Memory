@@ -3,6 +3,8 @@
  * Implements the 5 trigger conditions from the legacy system.
  */
 
+import { readProfileSources } from "../profile/profile-sources.js";
+import { readSceneIndex } from "../scene/scene-index.js";
 import { CheckpointManager } from "../../utils/checkpoint.js";
 import { stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { StorageAdapter } from "../storage/adapter.js";
@@ -24,12 +26,14 @@ export class PersonaTrigger {
   private interval: number;
   private logger: TriggerLogger | undefined;
   private storage: StorageAdapter | undefined;
+  private requireKnownSources: boolean;
 
-  constructor(opts: { dataDir: string; interval: number; logger?: TriggerLogger; storage?: StorageAdapter }) {
+  constructor(opts: { dataDir: string; interval: number; logger?: TriggerLogger; storage?: StorageAdapter; requireKnownSources?: boolean }) {
     this.dataDir = opts.dataDir;
     this.interval = opts.interval;
     this.logger = opts.logger;
     this.storage = opts.storage;
+    this.requireKnownSources = opts.requireKnownSources ?? false;
   }
 
   async shouldGenerate(): Promise<TriggerResult> {
@@ -50,6 +54,20 @@ export class PersonaTrigger {
     const hasSceneFiles = await this.hasSceneFiles();
     const hasPersonaBody = await this.hasPersonaBody();
     const hasGeneratedPersona = cp.last_persona_at > 0 || cp.last_persona_time !== "" || hasPersonaBody;
+
+    if (this.requireKnownSources && this.storage) {
+      const persona = await this.storage.readFile(StoragePaths.persona);
+      if (!persona || !(await readProfileSources(this.storage, StoragePaths.persona, persona)).complete) {
+        for (const entry of await readSceneIndex(this.dataDir, this.storage)) {
+          const key = `${StoragePaths.sceneBlocksDir}${entry.filename}`;
+          const scene = await this.storage.readFile(key);
+          if (scene && (await readProfileSources(this.storage, key, scene)).complete) {
+            return { should: true, reason: "恢复：已有可信场景，重新生成来源未知的 Team 画像" };
+          }
+        }
+        return { should: false, reason: "Team 画像等待可验证来源的场景" };
+      }
+    }
 
     // Priority 2: Cold start — first extraction done, no persona yet, has scene files
     if (

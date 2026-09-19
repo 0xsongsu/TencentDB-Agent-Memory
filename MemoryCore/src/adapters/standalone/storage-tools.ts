@@ -42,7 +42,7 @@ function resolveStorageKey(prefix: string, relativePath: string): string | null 
   const key = `${prefix}${normalized}`;
 
   // Double-check: split and reject any ".." segment
-  if (normalized.split("/").includes("..") || normalized.split("/").at(-1) === "manual-notes.md") return null;
+  if (normalized.split("/").includes("..") || normalized.split("/").some((part) => part === "profile-sources" || part === "unverified-profiles") || normalized.split("/").at(-1) === "manual-notes.md") return null;
 
   return key;
 }

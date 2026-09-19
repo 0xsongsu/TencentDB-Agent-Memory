@@ -1,3 +1,4 @@
+import type { ProfileSources } from "../core/profile/profile-sources.js";
 /**
  * TDAI Memory Gateway — v2 API Schemas.
  *
@@ -206,6 +207,7 @@ export interface AtomicSearchData {
 }
 
 export interface ScenarioEntry extends Omit<GeneratedScenarioEntry, "version"> {
+  sources?: ProfileSources;
   version?: number;
   summary?: string;
   team_id?: string;
@@ -218,6 +220,7 @@ export interface ScenarioListData {
 }
 
 export interface ScenarioFile extends Omit<GeneratedScenarioFile, "version"> {
+  sources?: ProfileSources;
   version?: number;
   team_id?: string;
   agent_id?: string;
@@ -230,6 +233,7 @@ export interface ScenarioWriteData extends Omit<GeneratedScenarioWriteData, "ver
 }
 
 export interface CoreFile extends Omit<GeneratedCoreFile, "version"> {
+  sources?: ProfileSources;
   version?: number;
   team_id?: string;
   agent_id?: string;

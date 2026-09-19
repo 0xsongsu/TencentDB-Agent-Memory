@@ -1,3 +1,4 @@
+import { trackProfileSources, writeProfileSources } from "../profile/profile-sources.js";
 /**
  * SceneExtractor: LLM-driven memory extraction into scene blocks.
  *
@@ -147,6 +148,26 @@ export class SceneExtractor {
       return { memoriesProcessed: 0, success: true };
     }
 
+    const requireKnownSources = this.traceContext?.agentId?.startsWith("team-") === true;
+    const sources = memories.map(memory => {
+      const metadata = memory.metadata ?? {};
+      const background = metadata.ghastTeamMemory === true && memory.scene_name
+        ? JSON.parse(memory.scene_name) as Record<string, unknown> : {};
+      const messageIds = [...new Set([
+        ...(memory.source_message_ids ?? []),
+        ...(typeof metadata.messageId === "string" ? [metadata.messageId] : []),
+        ...(Array.isArray(background.source_message_ids) ? background.source_message_ids as string[] : []),
+      ])];
+      const provenance = metadata.provenance as { sourceType?: string } | undefined;
+      return { complete: messageIds.length > 0 || provenance?.sourceType === "team_colleague_profile", messageIds };
+    });
+    if (this.storage && requireKnownSources) {
+      memories = memories.filter((_memory, index) => sources[index].complete);
+      if (memories.length === 0) return { memoriesProcessed: 0, success: true };
+    }
+    const lineage = this.storage ? trackProfileSources(this.storage,
+      requireKnownSources ? sources.filter(source => source.complete) : sources, requireKnownSources) : undefined;
+
     const sceneBlocksDir = this.storage ? StoragePaths.sceneBlocksDir : await (async () => { const path = await import("node:path"); return path.default.join(this.dataDir, "scene_blocks"); })();
     const metadataDir = this.storage ? StoragePaths.metadataDir : await (async () => { const path = await import("node:path"); return path.default.join(this.dataDir, ".metadata"); })();
 
@@ -178,8 +199,37 @@ export class SceneExtractor {
 
     // Phase 2: Load scene index
     const indexStartMs = Date.now();
-    const index = await readSceneIndex(this.dataDir, this.storage);
+    let index = await readSceneIndex(this.dataDir, this.storage);
     this.logger?.debug?.(`${TAG} extract() scene index loaded: ${index.length} entries (${Date.now() - indexStartMs}ms)`);
+
+    // Snapshot scene index + content before LLM — used later to diff created/updated/deleted
+    const preExtractIndex = new Map(index.map((e) => [e.filename, e.summary]));
+    // Also snapshot scene content so we can detect content-only changes vs metadata-only changes
+    const preExtractContent = new Map<string, string>();
+    const preExtractRaw = new Map<string, string>();
+    const excludedFiles = new Set<string>();
+    for (const e of index) {
+      let raw: string | null = null;
+      try {
+        if (this.storage) {
+          raw = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${e.filename}`);
+        } else {
+          const fs = await import("node:fs/promises");
+          const path = await import("node:path");
+          raw = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", e.filename), "utf-8");
+        }
+      } catch (error) {
+        if (this.storage) throw error;
+        this.logger?.warn(`${TAG} Could not read scene block: ${e.filename}`);
+      }
+      if (lineage && !await lineage.observe(`${StoragePaths.sceneBlocksDir}${e.filename}`, raw ?? "")) excludedFiles.add(e.filename);
+      if (!raw) continue;
+      preExtractRaw.set(e.filename, raw);
+      preExtractContent.set(e.filename, parseSceneBlock(raw, e.filename).content);
+    }
+
+    index = index.filter(entry => !excludedFiles.has(entry.filename)).map(entry =>
+      requireKnownSources ? { ...entry, ...parseSceneBlock(preExtractRaw.get(entry.filename)!, entry.filename).meta } : entry);
 
     // Build scene summaries for the prompt (relative filenames only)
     const { summaries: sceneSummaries, filenames: existingSceneFiles } =
@@ -197,26 +247,6 @@ export class SceneExtractor {
     } else if (sceneCount >= this.maxScenes - 3) {
       sceneCountWarning = `当前场景数量为 **${sceneCount} 个**，建议优先考虑 UPDATE 或主动 MERGE 相似场景。`;
       this.logger?.debug?.(`${TAG} extract() scene count approaching limit: ${sceneCount}/${this.maxScenes}`);
-    }
-
-    // Snapshot scene index + content before LLM — used later to diff created/updated/deleted
-    const preExtractIndex = new Map(index.map((e) => [e.filename, e.summary]));
-    // Also snapshot scene content so we can detect content-only changes vs metadata-only changes
-    const preExtractContent = new Map<string, string>();
-    for (const e of index) {
-      try {
-        let raw: string | null;
-        if (this.storage) {
-          raw = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${e.filename}`);
-        } else {
-          const fs = await import("node:fs/promises");
-          const path = await import("node:path");
-          raw = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", e.filename), "utf-8");
-        }
-        if (!raw) continue;
-        const block = parseSceneBlock(raw, e.filename);
-        preExtractContent.set(e.filename, block.content);
-      } catch { /* non-fatal */ }
     }
 
     // Phase 3: Build prompt
@@ -269,7 +299,7 @@ export class SceneExtractor {
         // maxTokens omitted → core uses the resolved model's maxTokens from catalog
         workspaceDir: sceneBlocksDir,
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS
-        storage: this.storage,
+        storage: lineage?.storage ?? this.storage,
         storagePrefix: this.storage ? StoragePaths.sceneBlocksDir : undefined,
         writeFilenamePrefix,
         ...traceParams,
@@ -400,7 +430,9 @@ export class SceneExtractor {
     this.logger?.debug?.(`${TAG} extract() scene index synced: ${Date.now() - syncStartMs}ms`);
 
     if (this.promptMode === "chat") {
-      const finalIndex = await readSceneIndex(this.dataDir, this.storage);
+      const finalIndex = (await readSceneIndex(this.dataDir, this.storage)).filter(entry =>
+        !requireKnownSources || lineage!.written.has(`${StoragePaths.sceneBlocksDir}${entry.filename}`) ||
+        (preExtractRaw.has(entry.filename) && !excludedFiles.has(entry.filename)));
       const sourceText = (await Promise.all(finalIndex.map(async (entry) => this.storage
         ? await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${entry.filename}`)
         : await (await import("node:fs/promises")).readFile((await import("node:path")).join(sceneBlocksDir, entry.filename), "utf-8")))).join("\n");
@@ -409,6 +441,19 @@ export class SceneExtractor {
         const sources = memory.source_message_ids ?? [];
         if (!(memory.id && sourceText.includes(memory.id)) && !(sources.length && sources.every((id) => sourceText.includes(id)))) {
           throw new Error(`L2 omitted verified memory ${memory.id}; extraction cursor must not advance`);
+        }
+      }
+    }
+
+    if (lineage && this.storage) {
+      // ponytail: one conservative source union per generation; track per-output dependencies only if finer visibility is needed.
+      const sources = lineage.sources();
+      const finalIndex = await readSceneIndex(this.dataDir, this.storage);
+      for (const entry of finalIndex) {
+        const key = `${StoragePaths.sceneBlocksDir}${entry.filename}`;
+        const raw = await this.storage.readFile(key);
+        if (raw && raw !== preExtractRaw.get(entry.filename) && (!requireKnownSources || lineage.written.has(key))) {
+          await writeProfileSources(this.storage, key, raw, sources);
         }
       }
     }

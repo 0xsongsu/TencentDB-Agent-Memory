@@ -1,3 +1,4 @@
+import { trackProfileSources, writeProfileSources } from "../profile/profile-sources.js";
 /**
  * PersonaGenerator: generates or updates user persona using the four-layer
  * deep scan model via CleanContextRunner.
@@ -88,6 +89,9 @@ export class PersonaGenerator {
     const targetFile = StoragePaths.persona;
     const targetLabel = this.promptMode === "code" ? "team operating doctrine" : "persona";
 
+    const requireKnownSources = this.traceContext?.agentId?.startsWith("team-") === true;
+    const lineage = this.storage ? trackProfileSources(this.storage, [], requireKnownSources) : undefined;
+
     // 1. Read existing L3 document (strip navigation)
     let existingPersona: string | undefined;
     try {
@@ -99,16 +103,25 @@ export class PersonaGenerator {
         const path = await import("node:path");
         raw = await fs.default.readFile(path.default.join(this.dataDir, targetFile), "utf-8");
       }
-      if (raw) {
+      if (raw && (!lineage || await lineage.observe(targetFile, raw))) {
         existingPersona = stripSceneNavigation(raw).trim() || undefined;
       }
       this.logger?.debug?.(`${TAG} Existing ${targetLabel}: ${existingPersona ? `${existingPersona.length} chars` : "empty"}`);
-    } catch {
+    } catch (error) {
+      if (this.storage) throw error;
       this.logger?.debug?.(`${TAG} No existing ${targetFile} file`);
     }
 
     // 2. Load scene index + identify changed scenes
-    const index = await readSceneIndex(this.dataDir, this.storage);
+    let index = await readSceneIndex(this.dataDir, this.storage);
+    if (lineage && this.storage) {
+      const verified = [];
+      for (const entry of index) {
+        const key = `${StoragePaths.sceneBlocksDir}${entry.filename}`;
+        if (await lineage.observe(key, await this.storage.readFile(key) ?? "")) verified.push(entry);
+      }
+      index = verified;
+    }
     const changedScenes = index.filter((e) => {
       if (!existingPersona || cp.request_persona_update || !cp.last_persona_time) return true;
       const updatedMs = new Date(e.updated).getTime();
@@ -140,7 +153,7 @@ export class PersonaGenerator {
       }
     }
 
-    if (changedSceneContents.length === 0 && existingPersona) {
+    if (changedSceneContents.length === 0 && (existingPersona || requireKnownSources)) {
       this.logger?.debug?.(`${TAG} No scene changes and persona exists, skipping generation`);
       return false;
     }
@@ -208,7 +221,7 @@ export class PersonaGenerator {
         // maxTokens omitted → core uses the resolved model's maxTokens from catalog
         workspaceDir: this.dataDir,
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS
-        storage: this.storage,
+        storage: lineage?.storage ?? this.storage,
         storagePrefix: this.storage ? "" : undefined,
         ...traceParams,
       });
@@ -216,6 +229,11 @@ export class PersonaGenerator {
     } catch (err) {
       const elapsedMs = Date.now() - startMs;
       this.logger?.error(`${TAG} Persona generation failed after ${elapsedMs}ms: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      return false;
+    }
+
+    if (requireKnownSources && !lineage!.written.has(targetFile)) {
+      this.logger?.error(`${TAG} No verified persona was written; preserving the existing profile without changing its provenance`);
       return false;
     }
 
@@ -250,6 +268,7 @@ export class PersonaGenerator {
     const finalContent = nav ? `${personaText}\n\n${nav}\n` : personaText;
     if (this.storage) {
       await this.storage.writeFile(targetFile, finalContent);
+      await writeProfileSources(this.storage, targetFile, finalContent, lineage!.sources());
     } else {
       const fs = await import("node:fs/promises");
       await fs.default.writeFile(personaFilePath, finalContent, "utf-8");

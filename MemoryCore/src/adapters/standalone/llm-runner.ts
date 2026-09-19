@@ -118,7 +118,7 @@ export interface StandaloneLLMConfig {
 
 function resolveSandboxedPath(workspaceDir: string, relativePath: string): string | null {
   const resolved = path.resolve(workspaceDir, relativePath);
-  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep) || path.basename(resolved) === "manual-notes.md") {
+  if (!resolved.startsWith(path.resolve(workspaceDir) + path.sep) || path.basename(resolved) === "manual-notes.md" || resolved.split(path.sep).some((part) => part === "profile-sources" || part === "unverified-profiles")) {
     return null;
   }
   return resolved;

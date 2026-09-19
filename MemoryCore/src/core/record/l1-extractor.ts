@@ -297,7 +297,7 @@ export async function extractL1Memories(params: {
       }
     }
     return {
-      success: true,
+      success: !earlyEmptyReason || earlyEmptyReason === "empty_scenes",
       extractedCount: 0,
       storedCount: 0,
       records: [],

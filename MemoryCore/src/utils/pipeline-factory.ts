@@ -1019,6 +1019,7 @@ export function createL3Runner(opts: {
       const profileOptions = profileOptionsForScope(scope);
 
       const trigger = new PersonaTrigger({
+        requireKnownSources: parseProfileIsolationScope(scope)?.agentId?.startsWith("team-") === true,
         dataDir: scopedDir,
         interval: cfg.persona.triggerEveryN,
         logger,

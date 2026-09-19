@@ -1,3 +1,4 @@
+import { mergeProfileSources, readProfileSources } from "../core/profile/profile-sources.js";
 /**
  * TDAI Memory Gateway — v2 REST Router.
  *
@@ -1943,7 +1944,7 @@ async function handleScenarioLs(body: unknown, _auth: V2AuthContext, requestId: 
   });
   const versionMap = await getProfileVersionBatch(deps.getStore(), "l2", l2Filenames, deps.requestIsolation);
 
-  const entries: ScenarioEntry[] = allEntries.map((e) => {
+  const entries: ScenarioEntry[] = await Promise.all(allEntries.map(async (e) => {
     const externalPath = e.key.startsWith(StoragePaths.sceneBlocksDir)
       ? e.key.slice(StoragePaths.sceneBlocksDir.length)
       : e.key;
@@ -1952,6 +1953,7 @@ async function handleScenarioLs(body: unknown, _auth: V2AuthContext, requestId: 
     const fallbackTime = e.lastModified.toISOString();
     return {
       path: displayPath,
+      sources: e.isDirectory ? undefined : await readProfileSources(storage, e.key, await storage.readFile(e.key) ?? ""),
       summary: indexEntry?.summary || undefined,
       version: e.isDirectory ? 0 : (versionMap.get(externalPath) ?? 0),
       team_id: deps.requestIsolation?.teamId,
@@ -1959,7 +1961,7 @@ async function handleScenarioLs(body: unknown, _auth: V2AuthContext, requestId: 
       created_at: indexEntry?.created || fallbackTime,
       updated_at: indexEntry?.updated || fallbackTime,
     };
-  });
+  }));
 
   return successEnvelope({ entries, total: entries.length }, requestId);
 }
@@ -2049,6 +2051,7 @@ async function handleScenarioRead(body: unknown, _auth: V2AuthContext, requestId
 
   return successEnvelope<ScenarioFile>({
     path, content,
+    sources: await readProfileSources(storage, key, content),
     version: await getProfileVersion(deps.getStore(), "l2", path, deps.requestIsolation),
     team_id: deps.requestIsolation?.teamId,
     agent_id: deps.requestIsolation?.agentId,
@@ -2205,6 +2208,10 @@ async function handleCoreRead(_body: unknown, _auth: V2AuthContext, requestId: s
 
   return successEnvelope<CoreFile>({
     content,
+    sources: mergeProfileSources(await Promise.all([
+      ...(manualContent ? [readProfileSources(storage, "manual-notes.md", manualContent)] : []),
+      ...(generatedContent ? [readProfileSources(storage, StoragePaths.persona, generatedContent)] : []),
+    ])),
     version: manual && stat ? Math.floor(new Date(stat.lastModified).getTime()) : await getProfileVersion(deps.getStore(), "l3", StoragePaths.persona, deps.requestIsolation),
     team_id: deps.requestIsolation?.teamId,
     agent_id: deps.requestIsolation?.agentId,
