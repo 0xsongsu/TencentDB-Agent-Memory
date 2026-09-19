@@ -498,6 +498,7 @@ export class OpenAIEmbeddingService implements EmbeddingService {
     const key = `${options?.timeoutMs ?? this.timeoutMs}\u0000${options?.priority ?? ""}\u0000${text}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
+    if (options?.priority === "interactive") this.logger?.debug?.(`${TAG} Generating query embedding...`);
     const pending = this.embedBatch([text], options).then(([result]) => result);
     this.inFlight.set(key, pending);
     return pending.finally(() => {

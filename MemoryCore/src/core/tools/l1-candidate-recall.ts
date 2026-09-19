@@ -234,7 +234,7 @@ async function recallVector(
   try {
     let vec = queryEmbedding && queryEmbedding.length > 0 ? queryEmbedding : undefined;
     if (!vec) {
-      logger?.debug?.(`${tag} [hybrid-vec] Generating query embedding...`);
+      logger?.debug?.(`${tag} [hybrid-vec] Requesting query embedding (shared while in flight)...`);
       vec = embeddingTimeoutMs != null
         ? await embeddingService!.embed(embeddingQuery, { timeoutMs: embeddingTimeoutMs, priority: "interactive" })
         : await embeddingService!.embed(embeddingQuery, { priority: "interactive" });

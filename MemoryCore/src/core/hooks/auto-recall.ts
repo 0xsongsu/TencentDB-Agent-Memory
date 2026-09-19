@@ -701,7 +701,7 @@ async function searchHybrid(
     (async () => {
       const tStart = performance.now();
       try {
-        logger?.debug?.(`${TAG} [hybrid-embedding] Generating query embedding...`);
+        logger?.debug?.(`${TAG} [hybrid-embedding] Requesting query embedding (shared while in flight)...`);
         const queryEmbedding = await embeddingService.embed(userText, embeddingCallOpts);
         logger?.debug?.(
           `${TAG} [hybrid-embedding] Embedding OK, dims=${queryEmbedding.length}, searching top-${candidateK}...`,

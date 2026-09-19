@@ -285,7 +285,7 @@ export async function executeConversationSearch(params: {
     (async (): Promise<ConversationSearchResultItem[]> => {
       if (!hasEmbedding) return [];
       try {
-        logger?.debug?.(`${TAG} [hybrid-vec] Generating query embedding...`);
+        logger?.debug?.(`${TAG} [hybrid-vec] Requesting query embedding (shared while in flight)...`);
         const embedding = await queryEmbedding!;
         logger?.debug?.(
           `${TAG} [hybrid-vec] Embedding OK, dims=${embedding.length}, searching top-${candidateK}...`,
