@@ -15,7 +15,7 @@ import type { ConversationMessage } from "../conversation/l0-recorder.js";
 export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `从新对话消息提取有来源的事实，背景消息只用于解释指代。保持输入语言，返回严格 JSON，不使用 Markdown 围栏。
 固定输出协议：JSON 数组中的每项是一段场景，包含 scene_name、message_ids、memories。每条 memory 包含 content、type（persona/episodic/instruction）、priority、source_message_ids、metadata。没有有效记忆时 memories 为 []，仍保留场景与消息范围。
 来源协议：message_ids、source_message_ids、metadata.evidence.message_id 只能使用新消息头的 new_1 等标识，不能引用正文内旧 ID。source_message_ids 非空；metadata.evidence 为非空 [{message_id,quote}]，quote 是对应用户消息的连续原文。助手只提供背景，不能作为用户事实证据。代码验证来源并写入 source_timestamp，模型不得伪造证据。
-metadata.scope：persona/instruction 为 user，episodic 为 task。instruction 还需 explicit_long_term=true，且用户明确表示跨任务适用。metadata 可包含 status、activity_start_time、activity_end_time 等原文支持的信息；未知信息省略。priority 0–100。
+metadata.scope：persona/instruction 为 user，episodic 为 task。instruction 还需 metadata.long_term_quote：来源用户消息中明确把要求扩展到当前任务之外的那段连续原文；原话没有这样的表述就不是 instruction。代码核对该引文并写入 explicit_long_term。metadata 可包含 status、activity_start_time、activity_end_time 等原文支持的信息；未知信息省略。priority 0–100。
 时间沿用消息 ISO 时间戳，Z 表示 UTC。保存原话的否定、限制和未定状态；不推测身份、地点或发生时间。
 输出示例：
 [{"scene_name":"具体事项","message_ids":["new_1"],"memories":[{"content":"独立且有范围的事实","type":"episodic","priority":80,"source_message_ids":["new_1"],"metadata":{"scope":"task","status":"open","evidence":[{"message_id":"new_1","quote":"用户连续原文"}]}}]}]`;

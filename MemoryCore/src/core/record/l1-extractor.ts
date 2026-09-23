@@ -246,13 +246,20 @@ export async function extractL1Memories(params: {
         mem.metadata.evidence = (evidence as Array<{ message_id: string; quote: string }>).map((item) => ({
           ...item, source_timestamp: new Date(sources.find((source) => source?.id === item.message_id)!.timestamp).toISOString(),
         }));
+        // Cross-task scope is a claim about the user's words, so the model must
+        // quote the words that make it; a self-reported flag let one-off task
+        // requirements become permanent user rules (F51-43).
+        const longTermQuote = mem.metadata.long_term_quote;
+        const longTermGrounded = typeof longTermQuote === "string" && longTermQuote.trim() !== "" &&
+          sources.some((source) => source?.role === "user" && source.content.includes(longTermQuote));
         if (mem.priority < 70 || !userGrounded ||
           (memType === "episodic" && mem.metadata.scope !== "task") ||
           ((memType === "persona" || memType === "instruction") && (!userGrounded || mem.metadata.scope !== "user")) ||
-          (memType === "instruction" && mem.metadata.explicit_long_term !== true)) {
+          (memType === "instruction" && !longTermGrounded)) {
           logger?.warn?.(`${TAG} Skipping memory that failed evidence, scope or value validation`);
           continue;
         }
+        if (memType === "instruction") mem.metadata.explicit_long_term = true;
       }
       allExtracted.push({
         content: mem.content,
