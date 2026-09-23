@@ -670,7 +670,15 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
     try {
       parsed = JSON.parse(sanitized) as unknown[];
     } catch (err) {
-      const repaired = repairExtractionJson(sanitized);
+      // A model that drops the outer array's closing `]` leaves the greedy
+      // match ending at the memories array's `]`; rebuild the scene array
+      // with a bracket scan over the whole tail instead (F51-45).
+      const tail = cleaned.slice(arrayMatch.index ?? 0);
+      const sceneArrayStart = tail.search(/\[\s*\{/);
+      const balanced = sceneArrayStart < 0
+        ? undefined
+        : balanceJsonArray(sanitizeJsonForParse(tail.slice(sceneArrayStart)));
+      const repaired = repairExtractionJson(balanced ?? sanitized);
       if (repaired === sanitized) throw err;
       parsed = JSON.parse(repaired) as unknown[];
       logger?.warn?.(`${TAG} Repaired non-strict extraction JSON: ${err instanceof Error ? err.message : String(err)}`);
@@ -717,6 +725,38 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
     );
     return { scenes: [], emptyReason: "parse_fail" };
   }
+}
+
+/**
+ * Cut `text` (which starts at `[`) at the `]` that closes it, or, when the
+ * text ends with brackets still open, append the missing closers after the
+ * last complete value. Returns undefined for mismatched brackets or text
+ * that ends inside a string, since those cannot be repaired without guessing.
+ */
+function balanceJsonArray(text: string): string | undefined {
+  const closers: string[] = [];
+  let inString = false;
+  let lastValueEnd = 0;
+  let openAtLastValueEnd: string[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") inString = true;
+    else if (ch === "[") closers.push("]");
+    else if (ch === "{") closers.push("}");
+    else if (ch === "]" || ch === "}") {
+      if (closers.pop() !== ch) return undefined;
+      if (closers.length === 0) return text.slice(0, i + 1);
+      lastValueEnd = i + 1;
+      openAtLastValueEnd = [...closers];
+    }
+  }
+  if (inString || lastValueEnd === 0) return undefined;
+  return text.slice(0, lastValueEnd) + openAtLastValueEnd.reverse().join("");
 }
 
 function repairExtractionJson(json: string): string {
