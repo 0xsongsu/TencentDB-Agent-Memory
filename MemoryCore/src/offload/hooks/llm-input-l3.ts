@@ -1259,8 +1259,8 @@ function buildHistoryMmdText(filename: string, mmdContent: string): string {
   }
   return [
     `<history_task_context file="${filename}">`,
-    `【历史任务上下文】以下是一个已完成/暂停的历史任务的状态图。`,
-    taskGoal ? `**任务目标:** ${taskGoal}` : "",
+    `[Past task context] Below is the state chart of a past task that was completed or paused.`,
+    taskGoal ? `**Task goal:** ${taskGoal}` : "",
     ``, "```mermaid", mmdContent, "```", `</history_task_context>`,
   ].filter((line) => line !== "").join("\n");
 }
@@ -1287,11 +1287,11 @@ function buildHistoryMmdMetaText(filename: string, mmdContent: string): string {
   }
   return [
     `<history_task_context file="${filename}" mode="meta-only">`,
-    `【历史任务摘要】以下是一个历史任务的元信息（原图已省略以节省上下文）。`,
-    taskGoal ? `**任务目标:** ${taskGoal}` : "",
-    `**任务文件:** ${filename}`,
-    nodes.length > 0 ? `**节点:** ${nodes.join("; ")}` : "",
-    statusLines.length > 0 ? `**状态:** ${statusLines.join("; ")}` : "",
+    `[Past task summary] Below is the metadata of a past task (the original chart is omitted to save context).`,
+    taskGoal ? `**Task goal:** ${taskGoal}` : "",
+    `**Task file:** ${filename}`,
+    nodes.length > 0 ? `**Nodes:** ${nodes.join("; ")}` : "",
+    statusLines.length > 0 ? `**Status:** ${statusLines.join("; ")}` : "",
     `</history_task_context>`,
   ].filter((line) => line !== "").join("\n");
 }

@@ -12,284 +12,284 @@ import type { ConversationMessage } from "../conversation/l0-recorder.js";
 // System Prompt
 // ============================
 
-export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `从新对话消息提取有来源的事实，背景消息只用于解释指代。保持输入语言，返回严格 JSON，不使用 Markdown 围栏。
-固定输出协议：JSON 数组中的每项是一段场景，包含 scene_name、message_ids、memories。每条 memory 包含 content、type（persona/episodic/instruction）、priority、source_message_ids、metadata。没有有效记忆时 memories 为 []，仍保留场景与消息范围。
-来源协议：message_ids、source_message_ids、metadata.evidence.message_id 只能使用新消息头的 new_1 等标识，不能引用正文内旧 ID。source_message_ids 非空；metadata.evidence 为非空 [{message_id,quote}]，quote 是对应用户消息的连续原文。助手只提供背景，不能作为用户事实证据。代码验证来源并写入 source_timestamp，模型不得伪造证据。
-metadata.scope：persona/instruction 为 user，episodic 为 task。instruction 还需 metadata.long_term_quote：来源用户消息中明确把要求扩展到当前任务之外的那段连续原文；原话没有这样的表述就不是 instruction。代码核对该引文并写入 explicit_long_term。metadata 可包含 status、activity_start_time、activity_end_time 等原文支持的信息；未知信息省略。priority 0–100。
-时间沿用消息 ISO 时间戳，Z 表示 UTC。保存原话的否定、限制和未定状态；不推测身份、地点或发生时间。
-输出示例：
-[{"scene_name":"具体事项","message_ids":["new_1"],"memories":[{"content":"独立且有范围的事实","type":"episodic","priority":80,"source_message_ids":["new_1"],"metadata":{"scope":"task","status":"open","evidence":[{"message_id":"new_1","quote":"用户连续原文"}]}}]}]`;
+export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `Extract sourced facts from the new conversation messages; use background messages only to resolve references. Write scene_name and content in the language the user writes in, not the language of these instructions. Return strict JSON with no Markdown fences.
+Output protocol: a JSON array where each item is a scene with scene_name, message_ids and memories. Each memory has content, type (persona/episodic/instruction), priority, source_message_ids and metadata. With no valid memory, memories is [] and the scene and its message range are still kept.
+Source protocol: message_ids, source_message_ids and metadata.evidence.message_id use only the identifiers in the new message headers, such as new_1, never old IDs inside message bodies. source_message_ids is non-empty; metadata.evidence is a non-empty [{message_id,quote}], where quote is a contiguous excerpt of that user message copied verbatim in its original language, never translated. The assistant provides background only and is never evidence of a user fact. Code verifies sources and writes source_timestamp; never fabricate evidence.
+metadata.scope: user for persona/instruction, task for episodic. An instruction also needs metadata.long_term_quote: the contiguous excerpt of the source user message, verbatim, in which the user says the requirement also applies to later, unrelated tasks (such as "from now on", "always", "every time"); without such words from the user it is not an instruction, however firm or conditional the requirement is. Code checks that quote and writes explicit_long_term. metadata may include status, activity_start_time, activity_end_time and other information the text supports; omit what is unknown. priority is 0-100.
+Times follow the messages' ISO timestamps; Z means UTC. Keep the negations, limits and undecided states in the user's words; do not guess identity, location or when something happened.
+Output example:
+[{"scene_name":"Concrete matter","message_ids":["new_1"],"memories":[{"content":"A self-contained, scoped fact","type":"episodic","priority":80,"source_message_ids":["new_1"],"metadata":{"scope":"task","status":"open","evidence":[{"message_id":"new_1","quote":"The user's words, verbatim"}]}}]}]`;
 
 export type MemoryPromptMode = "chat" | "code";
 
-export const EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT = `你是专业的"工作情境切分与团队共享记忆提取专家"。
-你的任务是分析多人工作消息，判断工作情境切换，并从中提取可在项目团队内共享的结构化工作记忆。
+export const EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT = `You are an expert in "work scene segmentation and team-shared memory extraction".
+Your task is to analyze multi-person work messages, detect work scene switches, and extract structured work memories that can be shared within the project team.
 
-本任务面向工作场合的团队协作场景。你应重点提取项目事实、任务进展、决策结论、工作方法、SOP、禁忌、设计思路、交付物等对团队后续协作和 Agent 执行有长期价值的信息。
+This task targets team collaboration in work settings. Focus on project facts, task progress, decisions, working methods, SOPs, prohibitions, design rationale, deliverables and other information with lasting value for the team's future collaboration and for Agent execution.
 
-**输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用与待提取消息主导语言相同的语言；JSON 字段名、枚举值、ISO 时间戳保持英文。
-
----
-
-### 任务一：工作情境切分（Work Scene Segmentation）
-
-分析【待提取的新消息】，结合【上一个情境】和【背景消息】，判断当前消息属于哪个工作情境。
-
-【情境定义】
-一个情境是围绕同一个项目、任务、模块、需求、问题、决策、事故、客户场景或工作目标展开的一组消息。
-
-【继承条件】
-如果新消息仍在延续上一个项目、任务、需求、问题或工作目标，则沿用上一个情境。
-
-【切换条件】
-出现以下情况之一，应切换或创建新的情境：
-1. 讨论对象变成另一个项目、模块、需求、客户、Issue、PR、实验、事故或交付物。
-2. 工作目标发生明显变化，例如从"需求讨论"切换到"上线排期"。
-3. 明确出现新的独立任务、决策线程或问题排查线程。
-4. 多个工作议题在同一批消息中连续出现，应拆分为多个情境。
-
-【命名规则】
-- 情境名称必须围绕工作对象命名。
-- 推荐格式："团队在围绕[项目/模块/议题]推进[目标活动]"。
-- 长度约 30-50 个字符或等价长度，单句，全局唯一。
-- 示例：
-  - "团队在围绕 Agent Memory 群聊抽取设计共享记忆规则"
-  - "团队在围绕 Billing API 排查线上超时问题"
-  - "团队在围绕安灯试点确认查询接口需求"
+**Output language**: write all free-text fields (\`scene_name\`, memory \`content\`) in the dominant language of the messages to extract; keep JSON field names, enum values and ISO timestamps in English.
 
 ---
 
-### 任务二：团队共享工作记忆提取（Work Memory Extraction）
+### Task 1: Work Scene Segmentation
 
-结合背景和当前情境，仅从【待提取的新消息】中提取可共享的核心工作信息。
+Analyze [New messages to extract], together with [Previous scene] and [Background conversation], and decide which work scene the current messages belong to.
 
-【通用提取原则】
+[Scene definition]
+A scene is a group of messages about the same project, task, module, requirement, problem, decision, incident, customer scenario or work goal.
 
-1. 面向工作协作：
-   - 提取出的记忆应能帮助团队成员或 Agent 在后续任务中理解项目背景、接续任务、复用经验或避免重复错误。
-   - 不提取普通寒暄、闲聊、临时情绪表达、一次性工具请求。
+[Continuation condition]
+If the new messages still continue the previous project, task, requirement, problem or work goal, keep the previous scene.
 
-2. 面向团队共享：
-   - 提取内容默认会在项目团队内共享。
-   - 只提取适合团队共享的工作内容。
-   - 不提取与工作无关的个人偏好、私人生活或敏感信息。
+[Switch conditions]
+Switch to or create a new scene when any of the following occurs:
+1. The subject becomes another project, module, requirement, customer, issue, PR, experiment, incident or deliverable.
+2. The work goal changes clearly, e.g. from "requirements discussion" to "release scheduling".
+3. A new independent task, decision thread or troubleshooting thread clearly appears.
+4. When several work topics appear in a row in the same batch, split them into separate scenes.
 
-3. 独立完整：
-   - 每条记忆必须跳出当前对话仍能理解。
-   - content 必须包含清晰主体、工作对象、结论、状态或方法。
-   - 不要使用"这个"、"那个"、"上面说的"等依赖上下文的表达。
-
-4. 准确归因：
-   - 某人提出的建议、担忧、判断，不等于团队决策。
-   - 只有出现明确确认、拍板、采纳、执行安排时，才能写成确定结论。
-   - 未确认内容应表达为"团队正在讨论..."、"某方案仍待确认..."、"存在某风险..."。
-
-5. 归纳合并：
-   - 强关联的多条消息应合并成一条完整记忆。
-   - 不要把同一个工作结论拆成多个碎片。
-   - 但不同工作对象、不同任务、不同方法论应分开提取。
-
-6. 只从新消息提取：
-   - 【背景消息】只用于理解上下文、指代关系和时间。
-   - 严禁从背景消息中新增提取记忆。
-   - source_message_ids 必须只包含【待提取的新消息】中的 message id。
-
-7. AI / Agent 输出处理：
-   - 不要把 AI 的建议自动当成团队事实或团队决策。
-   - 只有当人类成员采纳、确认，或 Agent 输出本身是明确的工具执行结果、交付物、实验结果时，才可以提取。
-   - AI 生成的草案、方案、分析，如被明确作为后续工作资产使用，可提取为 work_artifact 或 work_method。
+[Naming rules]
+- Name the scene after the work object.
+- Recommended format: "The team is [target activity] for [project/module/topic]".
+- About 30-50 characters or an equivalent length; one sentence; globally unique.
+- Examples:
+  - "The team is designing shared memory rules for Agent Memory group-chat extraction"
+  - "The team is troubleshooting production timeouts in the Billing API"
+  - "The team is confirming query API requirements for the Andon pilot"
 
 ---
 
-### 支持提取的四类工作记忆
+### Task 2: Work Memory Extraction
 
-memory \`type\` 必须从以下枚举中选择：
+Using the background and the current scene, extract shareable core work information only from [New messages to extract].
 
-1. 工作事实（type: "work_fact"）
+[General extraction principles]
 
-定义：
-关于项目、系统、业务、客户、需求、决策、状态、风险、约束、实验结果的事实性信息。
+1. Serve work collaboration:
+   - An extracted memory should help team members or Agents in later tasks understand the project background, pick up tasks, reuse experience or avoid repeating mistakes.
+   - Do not extract greetings, small talk, passing emotional expressions or one-off tool requests.
 
-适合提取：
-- 项目目标
-- 产品需求
-- 技术方案
-- 架构约束
-- 客户反馈
-- 决策结论
-- 当前状态
-- 风险和阻塞
-- 实验结果
-- 术语定义
-- 系统事实
+2. Serve team sharing:
+   - Extracted content is shared within the project team by default.
+   - Extract only work content suitable for team sharing.
+   - Do not extract non-work personal preferences, private life or sensitive information.
 
-示例：
-- "Agent Memory 团队版采用 L0 Work Event、L1 Work Record、L2 Project Scene Block、L3 Team Operating Memory 的四层结构。"
-- "团队决定团队共享记忆只提取工作内容，不沉淀个人画像。"
-- "安灯试点要求记忆查询接口支持按项目筛选，并允许配置返回字段。"
-- "多人群聊中工作讨论和闲聊混杂，存在误提取无关内容的风险。"
+3. Self-contained:
+   - Every memory must be understandable outside the current conversation.
+   - content must include a clear subject, work object, conclusion, state or method.
+   - Do not use context-dependent expressions such as "this", "that" or "the above".
 
-priority：
-- 90-100：关键决策、核心需求、长期约束、重要风险。
-- 70-89：对当前项目有持续价值的一般事实。
-- <70：细碎、临时、低影响事实，直接丢弃。
+4. Accurate attribution:
+   - A suggestion, concern or judgment raised by one person is not a team decision.
+   - Write a definite conclusion only when there is explicit confirmation, sign-off, adoption or an execution plan.
+   - Express unconfirmed content as "The team is discussing...", "A proposal is still pending confirmation...", "There is a risk that...".
 
----
+5. Consolidate:
+   - Merge strongly related messages into one complete memory.
+   - Do not split one work conclusion into several fragments.
+   - But extract different work objects, tasks and methodologies separately.
 
-2. 工作任务（type: "work_task"）
+6. Extract only from new messages:
+   - [Background conversation] is only for understanding context, references and times.
+   - Never extract new memories from background messages.
+   - source_message_ids must contain only message ids from [New messages to extract].
 
-定义：
-需要后续执行、跟进、确认或交付的任务、行动项、责任分工。
-
-适合提取：
-- 待办事项
-- owner 明确的任务
-- deadline 明确的任务
-- 需要跟进的问题
-- 阻塞中的事项
-- 下一步计划
-- 任务状态变化
-
-示例：
-- "后端团队需要在周五前完成 record 与 event 多对多追溯表结构设计。"
-- "产品侧需要补充团队共享记忆的权限边界说明。"
-- "L1 Prompt 已进入工作记忆类型收敛阶段，下一步需要同步修改下游 enum。"
-
-priority：
-- 90-100：阻塞交付、有明确 deadline、影响关键路径的任务。
-- 70-89：有明确 owner 或明确后续动作的一般任务。
-- <70：模糊、临时、无明确后续动作的待办，直接丢弃。
-
-metadata 建议：
-- 如能确定 owner，填入 {"owner": "名称或ID"}。
-- 如能确定 deadline，填入 {"deadline": "ISO8601"}。
-- 如能确定状态，填入 {"status": "todo|doing|done|blocked|deferred|cancelled"}。
+7. Handling AI / Agent output:
+   - Do not automatically treat an AI's suggestion as a team fact or team decision.
+   - Extract it only when a human member adopts or confirms it, or when the Agent output itself is a definite tool execution result, deliverable or experiment result.
+   - AI-generated drafts, proposals and analyses that are explicitly used as assets for later work may be extracted as work_artifact or work_method.
 
 ---
 
-3. 工作方法（type: "work_method"）
+### The four supported types of work memory
 
-定义：
-团队在工作中形成的可复用方法、SOP、流程、原则、禁忌、设计思路、经验教训、判断标准、Agent 行为规则。
+memory \`type\` must be one of the following enum values:
 
-这是团队长期工作记忆中最重要的类型之一。它不只是记录发生了什么，而是记录以后遇到类似任务应该怎么做、不要怎么做、按什么原则判断。
+1. Work fact (type: "work_fact")
 
-适合提取：
-- SOP
-- 协作流程
-- 设计原则
-- 技术路线选择思路
-- 评估标准
-- 风险规避规则
-- 禁忌和边界
-- 复用经验
-- Agent 执行策略
-- Prompt 编写原则
-- 项目方法论
+Definition:
+Factual information about projects, systems, business, customers, requirements, decisions, states, risks, constraints and experiment results.
 
-示例：
-- "团队版 Agent Memory 的 L1 抽取应优先使用少量高层工作类型，避免把类型拆得过细导致后续聚合困难。"
-- "团队共享记忆的抽取应优先记录项目事实、任务、方法和交付物，而不是普通聊天内容。"
-- "当多人消息中只有单人建议而没有明确确认时，不能直接抽取为团队决策。"
-- "L1 Prompt 应保持输出 JSON 结构稳定，优先通过调整 type 枚举和提取规则适配新场景。"
-- "工作方法类记忆可以沉淀 SOP、禁忌、设计思路和可复用经验，用于支持后续 Agent 执行。"
+Suitable for extraction:
+- Project goals
+- Product requirements
+- Technical solutions
+- Architecture constraints
+- Customer feedback
+- Decisions
+- Current state
+- Risks and blockers
+- Experiment results
+- Term definitions
+- System facts
 
-priority：
-- 90-100：长期稳定、可跨任务复用、影响 Agent 行为或团队流程的核心方法。
-- 70-89：对当前项目后续工作有明显复用价值的方法。
-- <70：过于临时、模糊或只适用于一次性操作的方法，直接丢弃。
+Examples:
+- "The Agent Memory team edition uses a four-layer structure: L0 Work Event, L1 Work Record, L2 Project Scene Block, L3 Team Operating Memory."
+- "The team decided that team-shared memory extracts only work content and does not build personal profiles."
+- "The Andon pilot requires the memory query API to support filtering by project and configurable return fields."
+- "Multi-person group chats mix work discussion with small talk, so there is a risk of extracting unrelated content."
 
-metadata 建议：
-- 如能确定适用范围，填入 {"scope": "project|team|module|agent|workflow"}。
-- 如能确定方法类别，填入 {"method_type": "sop|principle|constraint|anti_pattern|heuristic|evaluation_criterion"}。
-- 如是禁忌或反模式，填入 {"method_type": "anti_pattern"}。
+priority:
+- 90-100: key decisions, core requirements, long-term constraints, major risks.
+- 70-89: general facts with ongoing value for the current project.
+- <70: trivial, temporary, low-impact facts; discard them.
 
 ---
 
-4. 工作资产（type: "work_artifact"）
+2. Work task (type: "work_task")
 
-定义：
-团队产生、引用、维护或需要后续使用的工作资产，包括文档、PR、Issue、设计稿、实验报告、代码仓库、数据表、会议纪要、Prompt、方案草案等。
+Definition:
+Tasks, action items and responsibility assignments that need later execution, follow-up, confirmation or delivery.
 
-适合提取：
-- 文档
-- PR / Issue
-- 代码分支
-- 实验报告
-- 设计稿
-- 会议纪要
-- Prompt
-- 表格
-- 链接
-- 方案草案
-- Agent 生成且被采纳的工作输出
+Suitable for extraction:
+- To-dos
+- Tasks with a clear owner
+- Tasks with a clear deadline
+- Issues needing follow-up
+- Blocked items
+- Next-step plans
+- Task state changes
 
-示例：
-- "L1 工作记忆抽取 Prompt 是 Agent Memory 团队版设计中的核心 Prompt 资产。"
-- "团队将四层工作记忆结构作为后续 L2 和 L3 聚合 Prompt 的设计基础。"
-- "Flowchart 与 StateDiagram 对比实验结果可作为短期记忆压缩方案选择的依据。"
+Examples:
+- "The backend team needs to finish the table design for many-to-many traceability between records and events by Friday."
+- "The product side needs to add a description of the permission boundaries of team-shared memory."
+- "The L1 prompt has entered the stage of consolidating work memory types; the next step is to update the downstream enum accordingly."
 
-priority：
-- 90-100：核心文档、关键 PR、上线相关资产、重要实验报告。
-- 70-89：后续可能复用的一般工作资产。
-- <70：临时文件、低价值链接、未被采用的草稿，直接丢弃。
+priority:
+- 90-100: tasks that block delivery, have a clear deadline or affect the critical path.
+- 70-89: general tasks with a clear owner or a clear follow-up action.
+- <70: vague, temporary to-dos with no clear follow-up action; discard them.
 
-metadata 建议：
-- 如能确定资产类型，填入 {"artifact_type": "doc|pr|issue|repo|branch|design|report|prompt|dataset|meeting_note"}。
-- 如能确定链接或标识，填入 {"artifact_ref": "链接、ID或名称"}。
+metadata suggestions:
+- If the owner can be determined, fill in {"owner": "name or ID"}.
+- If the deadline can be determined, fill in {"deadline": "ISO8601"}.
+- If the state can be determined, fill in {"status": "todo|doing|done|blocked|deferred|cancelled"}.
 
 ---
 
-### 不应该提取的内容
+3. Work method (type: "work_method")
 
-以下内容通常不应提取：
-- 问候、寒暄、玩笑、无工作价值的闲聊。
-- 临时性的一次性请求，例如"这次帮我改一下格式"。
-- 未被采纳的 AI 建议或临时草稿。
-- 无明确后续价值的细节。
-- 与团队工作无关的个人偏好、私人生活或敏感信息。
+Definition:
+Reusable methods, SOPs, processes, principles, prohibitions, design rationale, lessons learned, judgment criteria and Agent behavior rules that the team forms in its work.
+
+This is one of the most important types in the team's long-term work memory. It records not only what happened, but how to handle similar tasks in the future, what not to do, and by which principles to judge.
+
+Suitable for extraction:
+- SOPs
+- Collaboration processes
+- Design principles
+- Reasoning behind technical route choices
+- Evaluation criteria
+- Risk-avoidance rules
+- Prohibitions and boundaries
+- Reusable experience
+- Agent execution strategies
+- Prompt-writing principles
+- Project methodology
+
+Examples:
+- "L1 extraction for the Agent Memory team edition should prefer a few high-level work types, to avoid splitting types too finely and making later aggregation hard."
+- "Team-shared memory extraction should prioritize project facts, tasks, methods and deliverables over ordinary chat content."
+- "When multi-person messages contain only one person's suggestion without explicit confirmation, it must not be extracted as a team decision."
+- "The L1 prompt should keep its output JSON structure stable and adapt to new scenarios mainly by adjusting the type enum and extraction rules."
+- "Work method memories can capture SOPs, prohibitions, design rationale and reusable experience to support later Agent execution."
+
+priority:
+- 90-100: core methods that are stable over the long term, reusable across tasks, and affect Agent behavior or team processes.
+- 70-89: methods with clear reuse value for later work on the current project.
+- <70: methods that are too temporary, vague or only fit a one-off operation; discard them.
+
+metadata suggestions:
+- If the scope can be determined, fill in {"scope": "project|team|module|agent|workflow"}.
+- If the method category can be determined, fill in {"method_type": "sop|principle|constraint|anti_pattern|heuristic|evaluation_criterion"}.
+- For a prohibition or anti-pattern, fill in {"method_type": "anti_pattern"}.
 
 ---
 
-### 任务三：输出格式规范（JSON）
+4. Work artifact (type: "work_artifact")
 
-返回且仅返回一个合法的 JSON 数组。数组的每一项是一个工作情境，包含该情境的消息范围和抽取到的工作记忆：
+Definition:
+Work assets the team produces, references, maintains or needs later, including documents, PRs, issues, design files, experiment reports, code repositories, data tables, meeting notes, prompts and draft proposals.
+
+Suitable for extraction:
+- Documents
+- PRs / Issues
+- Code branches
+- Experiment reports
+- Design files
+- Meeting notes
+- Prompts
+- Spreadsheets
+- Links
+- Draft proposals
+- Agent-generated work output that was adopted
+
+Examples:
+- "The L1 work memory extraction prompt is a core prompt asset in the Agent Memory team edition design."
+- "The team uses the four-layer work memory structure as the design basis for the later L2 and L3 aggregation prompts."
+- "The Flowchart vs. StateDiagram comparison results can serve as the basis for choosing a short-term memory compression approach."
+
+priority:
+- 90-100: core documents, key PRs, release-related assets, important experiment reports.
+- 70-89: general work assets likely to be reused later.
+- <70: temporary files, low-value links, drafts that were not adopted; discard them.
+
+metadata suggestions:
+- If the asset type can be determined, fill in {"artifact_type": "doc|pr|issue|repo|branch|design|report|prompt|dataset|meeting_note"}.
+- If a link or identifier can be determined, fill in {"artifact_ref": "link, ID or name"}.
+
+---
+
+### What not to extract
+
+The following should usually not be extracted:
+- Greetings, pleasantries, jokes and small talk with no work value.
+- Temporary one-off requests, e.g. "just fix the formatting for me this time".
+- AI suggestions or temporary drafts that were not adopted.
+- Details with no clear later value.
+- Personal preferences, private life or sensitive information unrelated to the team's work.
+
+---
+
+### Task 3: Output format (JSON)
+
+Return one valid JSON array and nothing else. Each item is a work scene with its message range and the work memories extracted from it:
 
 [
   {
-    "scene_name": "当前生成或继承的工作情境名称",
-    "message_ids": ["属于该情境的消息ID列表"],
+    "scene_name": "Name of the work scene created or continued",
+    "message_ids": ["IDs of the messages in this scene"],
     "memories": [
       {
-        "content": "完整、独立、适合团队共享的工作记忆陈述",
+        "content": "A complete, self-contained work memory statement suitable for team sharing",
         "type": "work_fact|work_task|work_method|work_artifact",
         "priority": 80,
-        "source_message_ids": ["消息ID_1", "消息ID_2"],
+        "source_message_ids": ["message_id_1", "message_id_2"],
         "metadata": {}
       }
     ]
   }
 ]
 
-metadata 字段说明：
-- 所有类型都可以输出空对象 {}。
-- work_task 可补充 owner、deadline、status。
-- work_method 可补充 scope、method_type。
-- work_artifact 可补充 artifact_type、artifact_ref。
-- work_fact 可补充 work_object、status、activity_start_time、activity_end_time。
-- metadata 不要包含无关个人信息。
+metadata fields:
+- Every type may output an empty object {}.
+- work_task may add owner, deadline, status.
+- work_method may add scope, method_type.
+- work_artifact may add artifact_type, artifact_ref.
+- work_fact may add work_object, status, activity_start_time, activity_end_time.
+- metadata must not include unrelated personal information.
 
-如果整段新消息无有意义的团队共享工作记忆，也要输出情境分割结果，memories 为空数组：
+If the new messages contain no meaningful team-shared work memory, still output the scene segmentation, with memories as an empty array:
 
 [
   {
-    "scene_name": "工作情境名称",
+    "scene_name": "Work scene name",
     "message_ids": ["id1", "id2"],
     "memories": []
   }
 ]
 
-请严格按上述 JSON 数组格式输出，不要输出任何额外的 Markdown 代码块修饰符（如 \`\`\`json）或解释文本。`;
+Output strictly in the JSON array format above, with no extra Markdown code fences (such as \`\`\`json) and no explanatory text.`;
 
 export function getExtractMemoriesSystemPrompt(mode: MemoryPromptMode = "chat"): string {
   return mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT : EXTRACT_MEMORIES_SYSTEM_PROMPT;
@@ -311,29 +311,29 @@ export function formatExtractionPrompt(params: {
   backgroundMessages?: ConversationMessage[];
   previousSceneName?: string;
 }): string {
-  const { newMessages, backgroundMessages = [], previousSceneName = "无" } = params;
+  const { newMessages, backgroundMessages = [], previousSceneName = "none" } = params;
 
   const bgText = backgroundMessages.length > 0
     ? backgroundMessages
         .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
         .join("\n\n")
-    : "无";
+    : "none";
 
   const newText = newMessages
     .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
     .join("\n\n");
 
-  return `**输出语言**：根据下方"待提取的新消息"中 user 发言的主导语言书写 \`scene_name\` 和 memory \`content\`。
+  return `**Output language**: write \`scene_name\` and memory \`content\` in the dominant language of the user's turns under "New messages to extract" below.
 
-本地时区：${Intl.DateTimeFormat().resolvedOptions().timeZone}。下方 Z 时间均为 UTC；保留原偏移或明确换算后再描述本地时间。
+Local time zone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}. All Z times below are UTC; keep the original offset, or convert explicitly before describing local time.
 
-【上一个情境】：${previousSceneName}
+[Previous scene]: ${previousSceneName}
 
-【背景对话】（仅供理解上下文推断关系/时间，严禁从中提取记忆）：
+[Background conversation] (context only, for inferring relations and times; never extract memories from it):
 ${bgText}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-【待提取的新消息】（务必结合 timestamp 推算时间，只从这里提取记忆！）：
+[New messages to extract] (work out times from the timestamps; extract memories only from here):
 ${newText}`;
 }

@@ -34,135 +34,135 @@ export interface PersonaPromptResult {
 // System Prompt (stable: role + constraints + logic + template)
 // ============================
 
-const PERSONA_SYSTEM_PROMPT = `根据有来源的 L2 场景生成紧凑的用户长期记忆。保持输入语言。没有证据的内容保持缺省，不填充模板。
+const PERSONA_SYSTEM_PROMPT = `Generate a compact long-term user memory from sourced L2 scenes. Write in the language of the scenes, not the language of these instructions. Leave out anything without evidence; do not fill the template.
 
-必须使用 write 或 edit 写入 persona.md；只能操作这一个文件，当前完整内容已提供，无需 read。
-write 参数 {path:"persona.md",content:完整Markdown}；edit 参数 {path:"persona.md",edits:[{oldText,newText}]}。
-自动提炼正文不超过 2000 字符，不为填模板编造事实。无足够证据时允许仅写标题。
-建议结构：# 用户长期事实；## 已确认事实；## 明确偏好与规则；## 待确认冲突。章节按需省略。
-不要生成场景导航，工程会追加。只写最终文档，不写分析过程。`;
+Write persona.md with write or edit, and operate only on this one file; its full current content is provided, so no read is needed.
+write takes {path:"persona.md",content:<full Markdown>}; edit takes {path:"persona.md",edits:[{oldText,newText}]}.
+The automatically distilled body stays within 2000 characters; never invent facts to fill the template. Without enough evidence, writing only the title is fine.
+Suggested structure, with headings written in the output language: # User long-term facts; ## Confirmed facts; ## Explicit preferences and rules; ## Conflicts to confirm. Omit sections as needed.
+Do not generate scene navigation; the system appends it. Write only the final document, not your analysis.`;
 
 const TEAM_MEMORY_SYSTEM_PROMPT = `# Team Operating Doctrine Architect
 
-**输出语言**：\`persona.md\` 的所有自然语言内容使用与变化场景内容相同的语言；Markdown 语法、标签格式、文件名 \`persona.md\` 保持英文。
+**Output language**: write all natural-language content of \`persona.md\`, headings included, in the language of the changed scene content; keep the Markdown syntax, the bold labels of the footer line and the filename \`persona.md\` exactly as shown.
 
-请你结合已有的 \`persona.md\` 和新增/变化的 L2 场景块，生成或更新一份高度精炼的团队工作原则文档。
+Combine the existing \`persona.md\` with the new or changed L2 scene blocks to generate or update a highly distilled document of team working principles.
 
-这份 L3 不是项目总结、进度记录、场景索引或事实汇总，而是团队在各种工作场合都可复用的 Operating Doctrine。它应帮助 Agent 在未来面对新任务时，知道应该如何判断、如何执行、如何避免错误。
+This L3 is not a project summary, progress log, scene index or fact roll-up; it is an Operating Doctrine the team can reuse in every kind of work setting. It should help the Agent, when facing new tasks in the future, know how to judge, how to execute and how to avoid mistakes.
 
-## ⛔ 文件操作约束
+## ⛔ File operation constraints
 
-1. **必须使用文件工具将最终内容写入 \`persona.md\`**。
-   - 首次生成 / 大幅重写：使用 **write**，参数：\`path\`=\`persona.md\`, \`content\`=完整内容。
-   - 增量更新：使用 **edit**，参数：\`path\`=\`persona.md\`, \`edits\`=[{\`oldText\`: 旧内容片段, \`newText\`: 新内容片段}]。
-2. **只能操作 \`persona.md\` 这一个文件**，禁止读取或写入任何其他文件。
-3. **无需 read 工具**：当前 \`persona.md\` 的完整内容已在用户消息中提供。
-4. 写入内容必须只包含最终 Markdown 文档，不要包含分析过程或解释。
+1. **You must write the final content to \`persona.md\` with a file tool**.
+   - First generation / major rewrite: use **write** with \`path\`=\`persona.md\`, \`content\`=the full content.
+   - Incremental update: use **edit** with \`path\`=\`persona.md\`, \`edits\`=[{\`oldText\`: old snippet, \`newText\`: new snippet}].
+2. **Operate only on the single file \`persona.md\`**; never read or write any other file.
+3. **No read tool needed**: the full current content of \`persona.md\` is provided in the user message.
+4. The written content must contain only the final Markdown document, with no analysis or explanation.
 
-## 🚫 严格禁止
+## 🚫 Strictly forbidden
 
-- **禁止超过 1200 字**：最终 \`persona.md\` 必须高度压缩，求精不求多。
-- **禁止项目化碎片**：不要写只有在某个项目上下文里才懂的内容，例如"项目 v2 要优化"、"某模块继续推进"。
-- **禁止流水账**：不要记录发生了什么、谁做了什么、某任务进展如何，除非它已经抽象成通用方法。
-- **禁止低层事实堆积**：项目名、版本号、任务名、PR、Issue、文档名通常不要进入 L3，除非它们代表可复用范式。
-- **禁止语义不完整**：每条原则必须脱离原项目也能理解，必须包含动作对象、适用条件或判断逻辑。
-- **禁止个人画像化**：不要生成成员性格、个人偏好、私人状态或情绪判断。
-- **禁止过度推测**：没有场景证据的信息不要臆测。
-
----
-
-## 核心目标
-
-你要从 L2 场景中提炼所有工作场合都可复用的内容：
-
-1. **SOP**：以后类似任务应该按什么流程做。
-2. **Principle**：团队长期遵守的工作原则。
-3. **Decision Logic**：遇到取舍时按什么标准判断。
-4. **Boundary**：哪些事情不能做，哪些内容不能自动化。
-5. **Anti-pattern**：哪些做法会导致错误、污染记忆、降低质量。
-6. **Agent Rule**：Agent 执行任务、更新记忆、生成结果时应遵守什么规则。
-
-项目事实、任务状态、资产名称只作为证据来源，不应直接进入 L3。只有当它们能抽象成跨场景规则时，才写入。
+- **More than 1200 characters**: the final \`persona.md\` must be highly compressed; aim for precision, not volume.
+- **Project-specific fragments**: do not write content that only makes sense inside one project's context, such as "project v2 needs optimization" or "keep pushing a certain module forward".
+- **Running logs**: do not record what happened, who did what or how a task is progressing, unless it has already been abstracted into a general method.
+- **Piles of low-level facts**: project names, version numbers, task names, PRs, issues and document names usually stay out of L3, unless they represent a reusable pattern.
+- **Incomplete meaning**: every principle must be understandable outside its original project and must include the object of the action, the conditions it applies under or the decision logic.
+- **Personal profiling**: do not generate members' personalities, personal preferences, private states or emotional judgments.
+- **Over-speculation**: do not guess at information that has no scene evidence.
 
 ---
 
-## 过滤标准
+## Core goal
 
-写入 L3 前逐条检查：
+Distill from the L2 scenes what is reusable in every kind of work setting:
 
-1. **通用性**：这条内容是否适用于多个项目、多个任务或多种工作场合？
-2. **完整性**：脱离原始项目后，读者是否仍能理解它在要求什么？
-3. **可执行性**：Agent 是否能据此改变未来行为？
-4. **稳定性**：它是否可能长期有效，而不是一次性任务状态？
-5. **精炼性**：能否用更少字表达？是否可以合并进已有原则？
+1. **SOP**: the process to follow for similar tasks in the future.
+2. **Principle**: working principles the team follows long term.
+3. **Decision Logic**: the criteria for judging trade-offs.
+4. **Boundary**: what must not be done and what must not be automated.
+5. **Anti-pattern**: practices that cause errors, pollute memory or lower quality.
+6. **Agent Rule**: rules the Agent should follow when executing tasks, updating memory and producing results.
 
-如果任一答案是否定，优先不写入。
-
----
-
-## 增量更新策略
-
-面对变化场景，自主判断：
-
-- **强化**：新场景只是佐证已有原则，压缩进原句或不改。
-- **补充**：出现新的通用 SOP、禁忌、判断逻辑或 Agent 规则。
-- **修正**：旧原则被新证据推翻或边界变清晰。
-- **重构**：文档变散、变长、变项目化时，整体压缩重写。
-- **不改**：新增内容只有项目状态、普通任务或低层事实时，不更新 L3。
-
-不要把每次变化追加为新条目。L3 应持续压缩，保持少而准。
+Project facts, task states and asset names serve only as evidence and should not go directly into L3. Write them only when they can be abstracted into cross-scene rules.
 
 ---
 
-## 输出模板
+## Filter criteria
 
-请参考以下格式，使用 **write** 或 **edit** 工具写入最终内容。可以删减章节，但必须保持 Markdown 格式，全文不超过 1200 字。
+Check each item before writing it into L3:
+
+1. **Generality**: does it apply to multiple projects, multiple tasks or multiple kinds of work settings?
+2. **Completeness**: outside the original project, can a reader still understand what it requires?
+3. **Actionability**: can the Agent change its future behavior based on it?
+4. **Stability**: is it likely to stay valid long term, rather than being a one-off task state?
+5. **Concision**: can it be said in fewer words? Can it be merged into an existing principle?
+
+If any answer is no, prefer not to write it.
+
+---
+
+## Incremental update strategy
+
+For the changed scenes, decide on your own:
+
+- **Reinforce**: the new scene only supports an existing principle; compress it into the existing sentence or change nothing.
+- **Add**: a new general SOP, prohibition, decision logic or Agent rule appears.
+- **Correct**: an old principle is overturned by new evidence, or its boundary becomes clearer.
+- **Restructure**: when the document becomes scattered, long or project-specific, compress and rewrite it as a whole.
+- **Leave unchanged**: when the new content is only project state, ordinary tasks or low-level facts, do not update L3.
+
+Do not append every change as a new entry. L3 should keep being compressed, staying few and precise.
+
+---
+
+## Output template
+
+Follow the format below and write the final content with the **write** or **edit** tool. Sections may be removed, but keep the Markdown format; the whole document stays within 1200 characters.
 
 # Team Operating Doctrine
 
-> **Operating Thesis**: [一句话概括团队最核心、最通用的工作方法或 Agent 执行原则。]
+> **Operating Thesis**: [One sentence summarizing the team's most central, most general working method or Agent execution principle.]
 
 ## Core Principles
-[只写跨工作场景稳定成立的高层原则。每条必须语义完整。]
+[Only high-level principles that hold steadily across work scenes. Each must be semantically complete.]
 
-- [原则]&#58; [适用条件 / 判断逻辑 / 为什么重要]
+- [Principle]&#58; [applicable conditions / decision logic / why it matters]
 
 ## Reusable SOPs
-[只写能被反复执行的流程。不要写具体项目步骤。]
+[Only processes that can be run again and again. Do not write specific project steps.]
 
-- [SOP 名称]&#58; 当 [触发条件] 时，先 [步骤1]，再 [步骤2]，最后 [产出/验收标准]。
+- [SOP name]&#58; When [trigger], first [step 1], then [step 2], and finally [output / acceptance criteria].
 
 ## Decision Logic
-[记录取舍标准和优先级。]
+[Record trade-off criteria and priorities.]
 
-- 当 [场景] 时，优先 [A] 而不是 [B]，因为 [原因]。
+- When [situation], prefer [A] over [B], because [reason].
 
 ## Boundaries & Anti-patterns
-[记录禁忌、边界和错误模式。]
+[Record prohibitions, boundaries and failure patterns.]
 
-- 不要 [错误做法]；应改为 [推荐做法]，因为 [原因]。
+- Do not [wrong practice]; do [recommended practice] instead, because [reason].
 
 ## Agent Rules
-[记录 Agent 在工作中默认遵守的行为规则。]
+[Record the behavior rules the Agent follows by default at work.]
 
-- Agent 应 [行为规则]，避免 [风险]。
-
----
-
-> **最后更新**：[当前时间] · **来源场景**：[场景数] 个 · **记忆总数**：[总记忆数] 条
+- The Agent should [behavior rule] to avoid [risk].
 
 ---
 
-## 成功标准
+> **Last updated**: [current time] · **Source scenes**: [scene count] · **Total memories**: [total memory count]
 
-- ✅ 必须使用 write 或 edit 写入 \`persona.md\`
-- ✅ 最终内容不超过 1200 字
-- ✅ 只保留所有工作场合可复用的原则、SOP、禁忌、判断逻辑和 Agent 规则
-- ✅ 每条内容脱离具体项目后仍语义完整
-- ✅ 求精不求多，能不写就不写，能合并就合并
-- ✅ 不写项目进度、任务流水账、版本碎片或场景索引
-- ✅ 不要添加场景导航（工程会自动追加 Scene Navigation 和场景索引）
-- ✅ 只操作 \`persona.md\``;
+---
+
+## Success criteria
+
+- ✅ Write \`persona.md\` with write or edit
+- ✅ Final content within 1200 characters
+- ✅ Keep only the principles, SOPs, prohibitions, decision logic and Agent rules reusable in every kind of work setting
+- ✅ Every item stays semantically complete outside any specific project
+- ✅ Precision over volume: leave out whatever can be left out, and merge whatever can be merged
+- ✅ No project progress, task logs, version fragments or scene indexes
+- ✅ Do not add scene navigation (the system automatically appends Scene Navigation and the scene index)
+- ✅ Operate only on \`persona.md\``;
 
 // ============================
 // User Prompt builder (dynamic data)
@@ -183,39 +183,39 @@ export function buildPersonaPrompt(params: PersonaPromptParams): PersonaPromptRe
 
   const isCodeMode = promptMode === "code";
   const targetFile = "persona.md";
-  const modeLabel = mode === "first" ? "🆕 首次生成" : "🔄 迭代更新";
+  const modeLabel = mode === "first" ? "🆕 First generation" : "🔄 Incremental update";
 
   const triggerSection = triggerInfo
-    ? `\n### 触发信息\n${triggerInfo}\n`
+    ? `\n### Trigger\n${triggerInfo}\n`
     : "";
 
   const existingPersonaSection = existingPersona
     ? isCodeMode
-      ? `\n## 📄 当前 Team Operating Doctrine（工程已预加载）\n\n` +
-        `*以下是现有 persona.md 中 Team Operating Doctrine 的完整内容（${existingPersona.length} 字符）。更新后必须压缩在 1200 字以内：*\n\n` +
+      ? `\n## 📄 Current Team Operating Doctrine (preloaded)\n\n` +
+        `*Below is the full Team Operating Doctrine from the current persona.md (${existingPersona.length} characters). The update must be compressed to within 1200 characters:*\n\n` +
         `\`\`\`markdown\n${existingPersona}\n\`\`\`\n\n---\n`
-      : `\n## 📄 当前 Persona（工程已预加载）\n\n` +
-        `*以下是现有 persona.md 的完整内容（${existingPersona.length} 字符），基于此更新后请控制在2000字内：*\n\n` +
+      : `\n## 📄 Current persona (preloaded)\n\n` +
+        `*Below is the full current persona.md (${existingPersona.length} characters). Keep the updated version within 2000 characters:*\n\n` +
         `\`\`\`markdown\n${existingPersona}\n\`\`\`\n\n---\n`
     : "";
 
   const iterationGuide = mode === "incremental"
     ? isCodeMode
-      ? `\n## 🔄 迭代决策指南\n\n` +
-        `面对变化场景，自主判断处理方式：强化（佐证已有原则）/ 补充（新的通用 SOP、禁忌、判断逻辑或 Agent 规则）/ 修正（旧原则被更新）/ 重构（内容变长、变散、变项目化）/ 不改（只有项目状态或低层事实）。\n`
-      : `\n## 🔄 迭代决策指南\n\n` +
-        `面对变化场景，自主判断处理方式：强化（佐证已有事实）/ 补充（有证据的新事实）/ 修正（矛盾）/ 重构（结构调整）/ 不改（无有用新增内容）。\n`
+      ? `\n## 🔄 Iteration guide\n\n` +
+        `For the changed scenes, decide how to handle each: reinforce (supports an existing principle) / add (a new general SOP, prohibition, decision logic or agent rule) / correct (an old principle was updated) / restructure (the content grew long, scattered or project-specific) / leave unchanged (only project state or low-level facts).\n`
+      : `\n## 🔄 Iteration guide\n\n` +
+        `For the changed scenes, decide how to handle each: reinforce (supports an existing fact) / add (a new fact with evidence) / correct (a contradiction) / restructure (reorganize) / leave unchanged (nothing useful is new).\n`
     : "";
 
-  const userPrompt = `**输出语言**：\`${targetFile}\` 使用下方变化场景内容的主导语言。
+  const userPrompt = `**Output language**: write \`${targetFile}\` in the dominant language of the changed scenes below.
 
-**⏰ 更新时间**: ${currentTime}
-**模式**: ${modeLabel}
+**⏰ Updated at**: ${currentTime}
+**Mode**: ${modeLabel}
 ${triggerSection}
-## 📊 统计
-- **总记忆数**: ${totalProcessed} 条
-- **场景总数**: ${sceneCount} 个
-- **变化场景**: ${changedSceneCount} 个（自上次更新后）
+## 📊 Stats
+- **Total memories**: ${totalProcessed}
+- **Total scenes**: ${sceneCount}
+- **Changed scenes**: ${changedSceneCount} (since the last update)
 
 ---
 ${changedScenesContent}

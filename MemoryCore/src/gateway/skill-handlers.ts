@@ -731,8 +731,8 @@ export async function handleListing(body: unknown, _auth: V2AuthContext, request
         : `- ${s.name}: ${s.description}`,
     );
     const formatHint = exposeSkillId
-      ? "# 每行一个 skill,字段以逗号分隔: id=<skill_id>, name=<名字>, desc=<描述>。\n" +
-        "# 调用 skill_view 时传 id 字段的值(形如 skl-xxxxxx)。\n"
+      ? "# One skill per line, comma-separated fields: id=<skill_id>, name=<name>, desc=<description>.\n" +
+        "# When calling skill_view, pass the value of the id field (like skl-xxxxxx).\n"
       : "";
     let listing = lines.length === 0
       ? "<available_skills>\n(none)\n</available_skills>"

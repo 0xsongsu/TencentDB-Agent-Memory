@@ -198,8 +198,8 @@ export class SkillExtractor {
     // 主 Agent 注入抽取提示（reason 非空时放在 prompt 最前面）
     if (input.reason && input.reason.trim().length > 0) {
       const hintBlock = [
-        "## 主 Agent 的抽取提示",
-        "以下是主 Agent 对本次对话的说明，请重点参考其意图进行抽取：",
+        "## Extraction hint from the main Agent",
+        "Below are the main Agent's notes on this conversation; base the extraction mainly on its intent:",
         input.reason,
       ].join("\n");
       prompt = `${hintBlock}\n\n---\n\n${prompt}`;
@@ -448,7 +448,7 @@ const QUERY_GEN_SYSTEM_PROMPT = [
   "- Output ONLY the keywords, on a single line, separated by single spaces.",
   "- No punctuation, no quotes, no bullets, no labels, no explanation.",
   "- Do NOT invent topics not present in the transcript.",
-  "- Prefer nouns / product names / verbs; drop filler words (the, a, 一下, 帮我).",
+  "- Prefer nouns / product names / verbs; drop filler words (the, a, please, help me).",
   "- If the transcript is empty or has no clear intent, output an empty line.",
 ].join("\n");
 

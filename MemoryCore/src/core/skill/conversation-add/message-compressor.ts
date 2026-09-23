@@ -47,7 +47,7 @@ export const DEFAULT_COMPRESS_OPTIONS: CompressOptions = {
   toolContentThresholdBytes: 2048,
   headBytes: 1024,
   tailBytes: 1024,
-  placeholder: "\n\n[中间内容过长已被压缩，只展示头尾]\n\n",
+  placeholder: "\n\n[The middle was too long and has been compressed; only the head and tail are shown]\n\n",
 };
 
 const COMPRESSIBLE_ROLES = new Set<CompressibleRole>(["tool_call", "tool_result"]);

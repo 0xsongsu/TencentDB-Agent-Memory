@@ -697,7 +697,7 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
       if (!Array.isArray(memories)) throw new Error("L1 response item has no memory array or fact content");
 
       scenes.push({
-        scene_name: typeof s.scene_name === "string" ? s.scene_name : "未知情境",
+        scene_name: typeof s.scene_name === "string" ? s.scene_name : "Unknown scene",
         message_ids: Array.isArray(s.message_ids) ? s.message_ids.map(String) : Array.isArray(s.source_message_ids) ? s.source_message_ids.map(String) : [],
         memories: Array.isArray(memories)
           ? (memories as Array<Record<string, unknown>>)

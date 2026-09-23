@@ -35,7 +35,7 @@ export const DEFAULT_OVERSIZE_OPTIONS: OversizeOptions = {
   chunkMaxBytes: 81_920, // 80KB
   headKeepBytes: 20_480, // 20KB
   tailKeepBytes: 20_480, // 20KB
-  placeholderTemplate: "[中间 {n} 条消息 / {bytes} 字节内容过长已省略]",
+  placeholderTemplate: "[{n} messages / {bytes} bytes in the middle were too long and have been omitted]",
 };
 
 export interface OversizeResult {

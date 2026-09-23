@@ -23,18 +23,18 @@ interface SceneEntry {
 
 // ── Memory Tools Guide ──
 const MEMORY_TOOLS_GUIDE = `<memory-tools-guide>
-## 记忆工具调用指南
+## Memory tools guide
 
-当上方注入的记忆片段不足以回答用户问题时，可主动调用以下工具获取更多信息：
+When the memory snippets injected above are not enough to answer the user's question, you may call these tools for more information:
 
-- **tdai_memory_search**：搜索结构化记忆（L1），适用于回忆用户偏好、历史事件、规则等。
-- **tdai_conversation_search**：搜索原始对话（L0），适用于查找具体消息原文、时间线、上下文细节。
-- **tdai_read_file**：读取记忆文件详情（使用下方 Scene Navigation 中的完整相对路径，如 scene_blocks/xxx.md；也可读 persona.md）。
+- **tdai_memory_search**: searches structured memories (L1); use it to recall user preferences, past events, rules and the like.
+- **tdai_conversation_search**: searches the raw conversation (L0); use it to find the original text of specific messages, timelines and contextual details.
+- **tdai_read_file**: reads the details of a memory file (use the full relative path from the Scene Navigation below, e.g. scene_blocks/xxx.md; persona.md can also be read).
 
-### ⚠️ 调用次数限制
-每轮对话中，tdai_memory_search 和 tdai_conversation_search **合计最多调用 3 次**。
-- 首次搜索无结果时，可换关键词或换工具重试，但总调用次数不要超过 3 次。
-- 若 3 次搜索后仍无结果，说明该信息不在记忆中，请直接根据已有信息回复用户。
+### ⚠️ Call limit
+In each conversation turn, tdai_memory_search and tdai_conversation_search may be called **at most 3 times combined**.
+- If the first search returns nothing, you may retry with other keywords or the other tool, but keep the total within 3 calls.
+- If 3 searches still return nothing, the information is not in memory; answer the user directly from what you already have.
 </memory-tools-guide>`;
 
 /**
@@ -79,7 +79,7 @@ function formatSystemContext(
   if (scenes.length > 0 && (!persona || !persona.includes("Scene Navigation"))) {
     parts.push("");
     parts.push("## 🗺️ Scene Navigation");
-    parts.push("*以下是当前场景记忆索引，可使用 tdai_read_file 读取详细内容。*");
+    parts.push("*Below is the current scene memory index; use tdai_read_file to read the details.*");
     parts.push("");
     for (const scene of scenes) {
       parts.push(`- \`${scene.path}\``);

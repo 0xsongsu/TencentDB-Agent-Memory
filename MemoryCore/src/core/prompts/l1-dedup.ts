@@ -13,84 +13,84 @@ import type { MemoryRecord, ExtractedMemory } from "../record/l1-writer.js";
 // System Prompt
 // ============================
 
-export const CONFLICT_DETECTION_SYSTEM_PROMPT = `比较新记忆与关联候选，输出每条新记忆对应的一项严格 JSON 决策，不要 Markdown 围栏。
+export const CONFLICT_DETECTION_SYSTEM_PROMPT = `Compare each new memory with its related candidates and output one strict JSON decision per new memory, with no Markdown fences.
 
-- 只依据 source_message_ids、metadata.evidence 中的用户原文核对概括。旧概括不是证据；其无依据的身份、状态、规则应纠正，不得继续传播。
-- 同一任务的新进度优先 update，以最新明确状态替换旧状态；时间线可由来源追溯，不必把所有阶段拼成一段长叙事。明确的新结果、纠错不能 skip。
-- store：不同事实、范围不同、旧记录无可核对证据，独立保存。
-- skip：相同范围、来源可靠，旧事实已完整准确包含新信息，且无新状态或纠错。
-- update：同一事实的新状态或纠错。merged_content 使用新记忆内容，保留其 type、priority。
-- merge：只有同范围、相同事实且确有互补信息才合并；每个细节必须有 evidence 支持。不得用同一主题把不同任务/人物合并。
-- 不将任务、测试观测或助手陈述变为长期规则、系统保证、人格或用户主张。一次“你好”接上活动只能表述为该次测试结果。
-- 保持新记忆 type、scope、explicit_long_term，不因合并提高确定性或优先级。不得补团队、职业、心理、时间、完成状态。
-- target_ids 只能来自该新记忆关联候选；store/skip 使用空数组。merge/update 的 merged_timestamps 保留输入时间戳，不捏造；Z 为 UTC。
+- Check summaries only against the user's words in source_message_ids and metadata.evidence. An old summary is not evidence; correct its unsupported identity, state or rules instead of propagating them.
+- New progress on the same task prefers update, replacing the old state with the latest explicit state; the timeline can be traced through the sources, so do not stitch every stage into one long narrative. A clear new result or correction is never skipped.
+- store: a different fact, a different scope, or an old record with no checkable evidence; save it separately.
+- skip: same scope, reliable source, and the old fact already contains the new information fully and accurately, with no new state or correction.
+- update: a new state of, or a correction to, the same fact. merged_content uses the new memory's content and keeps its type and priority.
+- merge: only for the same fact in the same scope with genuinely complementary information; every detail must be supported by evidence. Never merge different tasks or people because they share a topic.
+- Never turn tasks, test observations or assistant statements into long-term rules, system guarantees, personality or user claims. A single "hello" that reached an activity may only be described as that test's result.
+- Keep the new memory's type, scope and explicit_long_term; merging never raises certainty or priority. Do not add team, occupation, psychology, time or completion state.
+- target_ids come only from that new memory's related candidates; store/skip use an empty array. For merge/update, merged_timestamps keeps the input timestamps and never invents any; Z is UTC.
 
-输出结构：[{"record_id":"新ID","action":"store|skip|update|merge","target_ids":[],"merged_content":"仅 merge/update 需要","merged_type":"保持新 type","merged_priority":80,"merged_timestamps":[]}]
-输出语言与新记忆一致。`;
+Output structure: [{"record_id":"new ID","action":"store|skip|update|merge","target_ids":[],"merged_content":"merge/update only","merged_type":"keep the new type","merged_priority":80,"merged_timestamps":[]}]
+Write merged_content in the language of the new memory.`;
 
-export const WORK_CONFLICT_DETECTION_SYSTEM_PROMPT = `你是团队工作记忆冲突检测器。批量比较多条【新记忆】与【统一候选记忆池】中的已有记忆，逐条决定如何处理。
+export const WORK_CONFLICT_DETECTION_SYSTEM_PROMPT = `You are a team work memory conflict detector. Batch-compare the memories under "New memories to judge" with the existing memories in the "Unified candidate pool", and decide how to handle each one.
 
-**输出语言**：\`merged_content\` 使用与候选池中已有记忆相同的语言；JSON 字段名、枚举值、record_id、ISO 时间戳保持英文。
+**Output language**: write \`merged_content\` in the language of the new memory; keep JSON field names, enum values, record_id and ISO timestamps in English.
 
-## 核心规则
+## Core rules
 
-- **跨 type 合并**：不同 type（work_fact / work_task / work_method / work_artifact）的记忆如果语义上描述同一工作对象、任务、方法或资产，**可以合并**。
-- **多对多合并**：一条新记忆可以同时替换/合并候选池中的**多条**已有记忆（通过 target_ids 数组指定）。
-- 合并后你必须判断新记忆的最佳 type（merged_type）。
-- 记忆默认会在项目团队内共享，合并内容应只保留工作相关信息。
+- **Cross-type merge**: memories of different types (work_fact / work_task / work_method / work_artifact) **may be merged** if they semantically describe the same work object, task, method or asset.
+- **Many-to-many merge**: one new memory may replace or merge **several** existing memories in the candidate pool at once (listed in the target_ids array).
+- After a merge you must decide the new memory's best type (merged_type).
+- Memories are shared within the project team by default; merged content should keep only work-related information.
 
-## 判断逻辑
+## Decision logic
 
-1. **分辨记忆性质**：
-   - **工作事实类（work_fact）**：项目事实、需求、决策、状态、风险、约束、实验结果、客户反馈。
-   - **工作任务类（work_task）**：待办、owner、deadline、下一步计划、任务状态变化。
-   - **工作方法类（work_method）**：SOP、禁忌、原则、经验、设计思路、判断标准、Agent 行为规则。
-   - **工作资产类（work_artifact）**：文档、PR、Issue、Prompt、报告、代码分支、设计稿、链接等。
+1. **Identify the nature of each memory**:
+   - **Work fact (work_fact)**: project facts, requirements, decisions, states, risks, constraints, experiment results, customer feedback.
+   - **Work task (work_task)**: to-dos, owner, deadline, next-step plans, task state changes.
+   - **Work method (work_method)**: SOPs, prohibitions, principles, experience, design rationale, judgment criteria, Agent behavior rules.
+   - **Work artifact (work_artifact)**: documents, PRs, issues, prompts, reports, code branches, design files, links, etc.
 
-2. **判断是否同一工作对象/演化过程**：
-   - 同一项目、模块、需求、任务、风险、决策、方法、资产，且 scene_name 或语义高度相似。
-   - 同一任务的不同阶段、同一方法的补充、同一资产的版本或用途变化，通常可以合并。
-   - 仅属于同一大项目但讨论对象不同，不应强行合并。
+2. **Decide whether it is the same work object or evolution**:
+   - The same project, module, requirement, task, risk, decision, method or asset, with a highly similar scene_name or meaning.
+   - Different stages of the same task, additions to the same method, or version or usage changes of the same asset can usually be merged.
+   - Items that merely belong to the same large project but discuss different objects must not be forced together.
 
-3. **选择动作**：
-   - "store"：视为新信息，新增当前记忆。
-   - "skip"：已有记忆更好，新记忆无增量或更模糊，忽略当前记忆。
-   - "update"：同一工作对象，新记忆更具体、更新、更权威或纠正旧信息，以新记忆为主覆盖旧记忆，可保留旧记忆中仍正确的细节。
-   - "merge"：同一工作对象或同一演化过程，新旧记忆互补且不矛盾，合并成一条更完整记忆，信息尽量不冗余。
+3. **Choose the action**:
+   - "store": treat it as new information and add the current memory.
+   - "skip": the existing memory is better and the new memory adds nothing or is vaguer; ignore the current memory.
+   - "update": same work object, and the new memory is more specific, newer, more authoritative or corrects the old information; overwrite the old memory with the new one as the base, keeping details from the old memory that are still correct.
+   - "merge": same work object or same evolution, and the old and new memories complement each other without contradiction; combine them into one more complete memory with as little redundancy as possible.
 
-4. **策略倾向**：
-   - work_fact：同一事实/决策/状态的补充或修正 → 倾向 update 或 merge。
-   - work_task：同一任务的 owner、deadline、状态变化 → 倾向 update；补充依赖或验收标准 → 倾向 merge。
-   - work_method：同一 SOP、禁忌、原则、经验的补充 → 倾向 merge；更清晰通用的表述 → 倾向 update。
-   - work_artifact：同一文档、PR、Prompt、报告等资产的用途、版本、链接补充 → 倾向 merge 或 update。
-   - 跨类型示例：一条 work_fact "团队决定 L1 type 保持少量高层分类" + 一条 work_method "L1 type 不宜过细，否则影响 L2/L3 聚合" → 可 merge 为 work_method。
+4. **Strategy tendencies**:
+   - work_fact: an addition to or correction of the same fact/decision/state → prefer update or merge.
+   - work_task: owner, deadline or state changes of the same task → prefer update; added dependencies or acceptance criteria → prefer merge.
+   - work_method: additions to the same SOP, prohibition, principle or experience → prefer merge; a clearer, more general wording → prefer update.
+   - work_artifact: added usage, version or link for the same document, PR, prompt, report or other asset → prefer merge or update.
+   - Cross-type example: a work_fact "The team decided to keep L1 types to a few high-level categories" + a work_method "L1 types should not be too fine-grained, or L2/L3 aggregation suffers" → can be merged into a work_method.
 
-5. **timestamp 处理**：
-   - merge / update 时，merged_timestamps 应包含**所有相关记忆的时间戳并集**（去重排序）。
-   - 这样可以保留工作事实、任务或方法演化的完整时间线。
+5. **Timestamp handling**:
+   - For merge / update, merged_timestamps should contain **the union of the timestamps of all related memories** (deduplicated and sorted).
+   - This keeps the full timeline of how the work fact, task or method evolved.
 
-## 输出格式
+## Output format
 
-严格输出 JSON 数组，每个元素对应一条新记忆的决策。不输出任何其他内容：
+Output strictly a JSON array, one element per new memory's decision. Output nothing else:
 
 [
   {
-    "record_id": "新记忆的 record_id",
+    "record_id": "record_id of the new memory",
     "action": "store|update|skip|merge",
-    "target_ids": ["要删除的候选记忆 record_id 1", "record_id 2"],
-    "merged_content": "合并/更新后的记忆内容（merge/update 时必填）",
-    "merged_type": "合并后的最佳 type：work_fact|work_task|work_method|work_artifact（merge/update 时必填）",
+    "target_ids": ["record_id 1 of a candidate memory to delete", "record_id 2"],
+    "merged_content": "memory content after merge/update (required for merge/update)",
+    "merged_type": "best type after merging: work_fact|work_task|work_method|work_artifact (required for merge/update)",
     "merged_priority": 85,
-    "merged_timestamps": ["合并后的时间戳数组，包含所有新旧记忆时间戳的并集（merge/update 时必填）"]
+    "merged_timestamps": ["timestamp array after merging: the union of all new and old memory timestamps (required for merge/update)"]
   }
 ]
 
-字段说明：
-- target_ids：要删除替换的旧记忆 ID **数组**（可以 1 条或多条）。store/skip 时省略或为空。
-- merged_content：merge/update 时的最终记忆文本。store/skip 时省略。
-- merged_type：merge/update 后记忆应归属的 type。根据合并后内容本质判断。
-- merged_priority：merge/update 后的新优先级（0-100 整数，merge/update 时必填）。合并后信息更完整、更确定，通常应**酌情提升** priority。参考标准：80-100（关键事实/重要任务/核心方法/重要资产），60-79（一般工作信息），<60（次要信息）。
-- merged_timestamps：合并后的时间戳数组。收集新记忆 + 所有被合并旧记忆的时间戳，去重排序。`;
+Fields:
+- target_ids: an **array** of old memory IDs to delete and replace (one or more). Omit or leave empty for store/skip.
+- merged_content: the final memory text for merge/update. Omit for store/skip.
+- merged_type: the type the memory belongs to after merge/update, judged by the nature of the merged content.
+- merged_priority: the new priority after merge/update (integer 0-100, required for merge/update). Merged information is more complete and more certain, so priority should usually be **raised as appropriate**. Reference: 80-100 (key facts / important tasks / core methods / important assets), 60-79 (general work information), <60 (minor information).
+- merged_timestamps: the timestamp array after merging. Collect the timestamps of the new memory plus all merged old memories, deduplicated and sorted.`;
 
 export function getConflictDetectionSystemPrompt(mode: MemoryPromptMode = "chat"): string {
   return mode === "code" ? WORK_CONFLICT_DETECTION_SYSTEM_PROMPT : CONFLICT_DETECTION_SYSTEM_PROMPT;
@@ -149,10 +149,10 @@ export function formatBatchConflictPrompt(matches: CandidateMatch[]): string {
 
   let poolSection: string;
   if (poolList.length === 0) {
-    poolSection = "## 统一候选记忆池\n\n（空，没有已有记忆，所有新记忆直接 store）";
+    poolSection = "## Unified candidate pool\n\n(Empty: there are no existing memories, so every new memory is stored.)";
   } else {
     const poolStr = JSON.stringify(poolList, null, 2);
-    poolSection = `## 统一候选记忆池（共 ${poolList.length} 条已有记忆）\n\n${poolStr}`;
+    poolSection = `## Unified candidate pool (${poolList.length} existing memories)\n\n${poolStr}`;
   }
 
   // Step 3: Format each new memory with its related candidate IDs
@@ -161,7 +161,7 @@ export function formatBatchConflictPrompt(matches: CandidateMatch[]): string {
     const relatedNote =
       relatedIds.length > 0
         ? JSON.stringify(relatedIds)
-        : "[]（无相似候选，直接 store）";
+        : "[] (no similar candidates; store it)";
 
     const memStr = JSON.stringify(
       {
@@ -177,7 +177,7 @@ export function formatBatchConflictPrompt(matches: CandidateMatch[]): string {
       2,
     );
 
-    return `### 第 ${idx + 1} 条新记忆 (record_id: ${m.newMemory.record_id})\n${memStr}\n\n【关联候选 ID】${relatedNote}`;
+    return `### New memory ${idx + 1} (record_id: ${m.newMemory.record_id})\n${memStr}\n\n[Related candidate IDs] ${relatedNote}`;
   });
 
   const newMemoriesText = memoryParts.join(
@@ -185,15 +185,15 @@ export function formatBatchConflictPrompt(matches: CandidateMatch[]): string {
   );
 
   // Step 4: Assemble final prompt
-  return `**输出语言**：\`merged_content\` 使用与候选池中已有记忆相同的语言。
+  return `**Output language**: write \`merged_content\` in the language of the new memory.
 
 ${poolSection}
 
 ${"═".repeat(50)}
 
-## 待判断的新记忆（共 ${matches.length} 条）
+## New memories to judge (${matches.length})
 
 ${newMemoriesText}
 
-请逐条判断并输出决策 JSON 数组。当某条新记忆的候选列表为空时，该条直接输出 action=store。`;
+Judge each one and output the decision JSON array. When a new memory's candidate list is empty, output action=store for it.`;
 }

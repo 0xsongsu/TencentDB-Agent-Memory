@@ -30,7 +30,7 @@ import {
 import type { Logger } from "../types.js";
 
 const TAG = "[memory-tdai] [recall]";
-const RECALL_TRUNCATION_SUFFIX = "…（已截断；可用 tdai_memory_search 或 tdai_conversation_search 查看详情）";
+const RECALL_TRUNCATION_SUFFIX = "… (truncated; see tdai_memory_search or tdai_conversation_search for details)";
 const MIN_TRUNCATED_RECALL_LINE_CHARS = 40;
 const RECALL_LINE_SEPARATOR = "\n";
 
@@ -39,18 +39,18 @@ const RECALL_LINE_SEPARATOR = "\n";
  * main agent knows how to actively retrieve deeper information.
  */
 const MEMORY_TOOLS_GUIDE = `<memory-tools-guide>
-## 记忆工具调用指南
+## Memory tools guide
 
-当上方注入的记忆片段不足以回答用户问题时，可主动调用以下工具获取更多信息：
+When the memory snippets injected above are not enough to answer the user's question, you may call these tools for more information:
 
-- **tdai_memory_search**：搜索结构化记忆（L1），适用于回忆用户偏好、历史事件节点、规则等关键信息。
-- **tdai_conversation_search**：搜索原始对话（L0），适用于查找具体消息原文、时间线、上下文细节；也可用于补充或校验 memory_search 的结果。
-- **read_file**（Scene Navigation 中的路径）：当已定位到相关情境，且需要该场景的完整画像、事件经过或阶段结论时使用。
+- **tdai_memory_search**: searches structured memories (L1); use it to recall key information such as user preferences, past event milestones and rules.
+- **tdai_conversation_search**: searches the raw conversation (L0); use it to find the original text of specific messages, timelines and contextual details; it can also supplement or verify memory_search results.
+- **read_file** (paths in Scene Navigation): use it once you have located the relevant scene and need its full profile, course of events or stage conclusions.
 
-### ⚠️ 调用次数限制
-每轮对话中，tdai_memory_search 和 tdai_conversation_search **合计最多调用 3 次**。
-- 首次搜索无结果时，可换关键词或换工具重试，但总调用次数不要超过 3 次。
-- 若 3 次搜索后仍无结果，说明该信息不在记忆中，请直接根据已有信息回复用户，不要继续搜索。
+### ⚠️ Call limit
+In each conversation turn, tdai_memory_search and tdai_conversation_search may be called **at most 3 times combined**.
+- If the first search returns nothing, you may retry with other keywords or the other tool, but keep the total within 3 calls.
+- If 3 searches still return nothing, the information is not in memory; answer the user directly from what you already have and stop searching.
 </memory-tools-guide>`
 
 /** A single recalled L1 memory with its search score and type. */
@@ -191,7 +191,7 @@ async function performAutoRecallCore(params: {
 
     // Extract structured RecalledMemory from formatted lines for metric reporting
     recalledL1Memories = memoryLines.map((line, i) => {
-      const match = line.match(/^-\s+\[([^\]]+)\]\s+(.+?)(?:\s*\(活动时间:.*\))?$/);
+      const match = line.match(/^-\s+\[([^\]]+)\]\s+(.+?)(?:\s*\((?:activity time|活动时间):.*\))?$/);
       if (match) {
         const tag = match[1];
         const content = match[2].trim();
@@ -278,7 +278,7 @@ async function performAutoRecallCore(params: {
   let prependContext: string | undefined;
   if (memoryLines.length > 0) {
     prependContext =
-      `<relevant-memories>\n以下是当前对话召回的相关记忆，不代表当前任务进程，仅作为参考：\n\n${memoryLines.join(RECALL_LINE_SEPARATOR)}\n</relevant-memories>`;
+      `<relevant-memories>\nRelevant memories recalled for this conversation. They do not reflect the progress of the current task; use them for reference only:\n\n${memoryLines.join(RECALL_LINE_SEPARATOR)}\n</relevant-memories>`;
   }
 
   // Append memory tools usage guide to the stable part so the agent knows
@@ -409,7 +409,7 @@ async function searchMemoriesWithDetails(
   // Extract structured data from formatted memory lines.
   // Format: "- [type|scene] content (活动时间: ...)" or "- [type] content"
   const memories: RecalledMemory[] = result.lines.map((line, i) => {
-    const match = line.match(/^-\s+\[([^\]]+)\]\s+(.+?)(?:\s*\(活动时间:.*\))?$/);
+    const match = line.match(/^-\s+\[([^\]]+)\]\s+(.+?)(?:\s*\((?:activity time|活动时间):.*\))?$/);
     if (match) {
       const tag = match[1];
       const content = match[2].trim();
@@ -823,16 +823,16 @@ function formatMemoryLine(m: FormatableMemory): string {
 
   if (start && end) {
     // 段时间: both start and end
-    line += ` (活动时间: ${start} ~ ${end})`;
+    line += ` (activity time: ${start} ~ ${end})`;
   } else if (start) {
     // 段时间: only start
-    line += ` (活动时间: ${start}起)`;
+    line += ` (activity time: from ${start})`;
   } else if (end) {
     // 段时间: only end
-    line += ` (活动时间: 至${end})`;
+    line += ` (activity time: until ${end})`;
   } else if (point) {
     // 点时间: single timestamp
-    line += ` (活动时间: ${point})`;
+    line += ` (activity time: ${point})`;
   }
   // If all three are empty → no time info appended (graceful)
 
